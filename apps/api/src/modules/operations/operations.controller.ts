@@ -1,0 +1,19 @@
+import { Controller, Get, UseGuards } from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
+import { OperationsService } from './operations.service';
+
+@Controller('operations')
+@UseGuards(AuthGuard('jwt'))
+export class OperationsController {
+  constructor(private readonly operations: OperationsService) {}
+
+  @Get('mobile4/positions')
+  mobile4() {
+    return this.operations.mobile4Positions();
+  }
+
+  @Get('inspectors')
+  inspectors() {
+    return this.operations.listInspectors();
+  }
+}

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Tablero de huecos</title>
+  <style>
+    body{font-family:system-ui,sans-serif;margin:0;background:#f5f7fa;color:#172033}
+    header{padding:20px 28px;background:#173f5f;color:white} main{padding:22px 28px}
+    .filters{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}.filters input,.filters select,.filters button{padding:9px;border:1px solid #cbd5e1;border-radius:7px}
+    table{width:100%;border-collapse:collapse;background:white;box-shadow:0 2px 12px #0001}th,td{padding:10px;border-bottom:1px solid #e2e8f0;text-align:left}th{background:#eaf0f6}
+    .pending{color:#a61b1b;font-weight:700}.justified{color:#166534;font-weight:700}.empty{padding:30px;text-align:center}
+  </style>
+</head>
+<body><header><h1>Huecos de cobertura</h1></header><main>
+  <div class="filters">
+    <input id="from" type="date"><input id="to" type="date">
+    <select id="mobile"><option value="">Todos los móviles</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select>
+    <select id="shift"><option value="">Todos los turnos</option><option value="M">Mañana</option><option value="T">Tarde</option><option value="N">Noche</option></select>
+    <select id="acceptance"><option value="">Todos</option><option>PENDIENTE</option><option>JUSTIFICADO</option></select>
+    <button onclick="loadGaps()">Buscar</button>
+  </div>
+  <table><thead><tr><th>Fecha</th><th>Móvil</th><th>Turno</th><th>Estado</th><th>Motivo</th><th>Responsable</th></tr></thead><tbody id="rows"></tbody></table>
+</main><script>
+async function loadGaps(){
+ const q=new URLSearchParams(); for(const [id,key] of [['from','date_from'],['to','date_to'],['mobile','mobile'],['shift','shift'],['acceptance','acceptance']]){const v=document.getElementById(id).value;if(v)q.set(key,v)}
+ const res=await fetch('/reports/gaps?'+q); const data=await res.json(); const body=document.getElementById('rows'); body.innerHTML='';
+ if(!data.length){body.innerHTML='<tr><td colspan="6" class="empty">No hay huecos para los filtros seleccionados.</td></tr>';return}
+ for(const x of data){const tr=document.createElement('tr');const cls=x.estado_aceptacion==='PENDIENTE'?'pending':'justified';tr.innerHTML=`<td>${x.fecha_operativa}</td><td>${x.movil}</td><td>${x.turno}</td><td class="${cls}">${x.estado_aceptacion}</td><td>${x.motivo_hueco??''}</td><td>${x.responsable_aceptacion??''}</td>`;body.appendChild(tr)}
+} loadGaps();
+</script></body></html>

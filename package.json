@@ -1,0 +1,25 @@
+{
+  "name": "plataforma-inspectores",
+  "private": true,
+  "version": "2.6.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "npm run start:dev -w @plataforma/api",
+    "dev:web": "npm run dev -w @plataforma/web",
+    "build": "npm run build -w @plataforma/shared && npm run build -w @plataforma/api && npm run build -w @plataforma/web",
+    "test": "npm run test -w @plataforma/api",
+    "db:up": "docker compose up -d postgres",
+    "db:migrate": "node scripts/migrate.mjs",
+    "db:seed": "node scripts/seed.mjs"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "pg": "^8.14.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

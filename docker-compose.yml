@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: seguridad_vial
+      POSTGRES_USER: seguridad_vial
+      POSTGRES_PASSWORD: seguridad_vial_local
+    ports:
+      - "55433:5432"
+    volumes:
+      - seguridad_vial_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U seguridad_vial -d seguridad_vial"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://seguridad_vial:seguridad_vial_local@postgres:5432/seguridad_vial
+      JWT_SECRET: cambio-local-mvp-seguridad-vial
+      CORS_ORIGIN: http://localhost:5173
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    environment:
+      VITE_API_URL: http://localhost:3000
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+volumes:
+  seguridad_vial_pgdata:

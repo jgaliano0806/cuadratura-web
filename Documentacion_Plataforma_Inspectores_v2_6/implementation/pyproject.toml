@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seguridad-vial-operaciones"
+version = "2.6.0"
+description = "Inicializador Excel y servicios operativos de cuadraturas"
+requires-python = ">=3.11"
+dependencies = [
+  "artifact-tool",
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+  "python-multipart>=0.0.9"
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.1"]
+test = ["pytest>=8"]
+
+[project.scripts]
+sv-inicializador = "seguridad_vial.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+markers = ["integration: prueba con el Excel oficial"]
