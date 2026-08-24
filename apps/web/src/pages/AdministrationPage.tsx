@@ -183,11 +183,8 @@ export function AdministrationPage() {
             </div>
           </div>
           <div className="filters" style={{ marginTop: '1.25rem' }}>
-            <Link className="btn" to="/inicializacion">
-              Inicialización Excel
-            </Link>
-            <Link className="btn secondary" to="/calendario">
-              Cronograma
+            <Link className="btn secondary" to="/cronograma-planificado">
+              Cronograma planificado
             </Link>
             <Link className="btn amber" to="/huecos">
               Tablero de huecos
@@ -197,6 +194,9 @@ export function AdministrationPage() {
             </Link>
             <Link className="btn secondary" to="/movil4">
               Móvil 4
+            </Link>
+            <Link className="btn secondary" to="/ruta36">
+              Ruta 36
             </Link>
           </div>
         </section>

@@ -21,6 +21,24 @@ export class OperationsService {
     return result.rows;
   }
 
+  async ruta36Positions() {
+    const result = await this.db.query(
+      `SELECT posicion_codigo,
+              posicion_nombre,
+              tipo,
+              fecha_desde::text AS fecha_desde,
+              fecha_hasta::text AS fecha_hasta,
+              legajo,
+              nombre_completo,
+              movil,
+              sitio,
+              base_nombre
+       FROM seguridad_vial.v_ruta36_posiciones_vigentes
+       ORDER BY movil, posicion_codigo`,
+    );
+    return result.rows;
+  }
+
   async listInspectors() {
     const result = await this.db.query(
       `SELECT id, nombre_completo, estado

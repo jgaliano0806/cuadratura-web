@@ -124,6 +124,57 @@ describe('motor de proyección', () => {
     expect(codes.slice(0, 4)).toEqual(['M4', 'N4', 'T4', 'M4']);
   });
 
+  it('móvil 6 Ruta 36 fijo reproduce ancla junio (López J. M6)', () => {
+    const days = projectRange(
+      baseInput({
+        positionCode: 'M6-P01',
+        referenceDate: '2026-06-01',
+        cyclePosition: 0,
+        shift: 'M',
+        mobile: 6,
+        shiftIndex: 0,
+        mobileIndex: 0,
+        shifts: ['M', 'N', 'T'],
+        mobiles: [6],
+        completedBlocksOnMobile: 0,
+      }),
+      '2026-06-01',
+      '2026-06-16',
+    );
+    const byDate = Object.fromEntries(days.map((d) => [d.date, d.code]));
+    expect(byDate['2026-06-01']).toBe('M6');
+    expect(byDate['2026-06-05']).toBe('M6');
+    expect(byDate['2026-06-06']).toBe('F');
+    expect(byDate['2026-06-08']).toBe('F');
+    expect(byDate['2026-06-09']).toBe('N6');
+    expect(byDate['2026-06-13']).toBe('N6');
+    expect(byDate['2026-06-14']).toBe('F');
+  });
+
+  it('móvil 6 en franco al 01/06 avanza a M6 el 03/06 (Fanloo)', () => {
+    const days = projectRange(
+      baseInput({
+        positionCode: 'M6-P04',
+        referenceDate: '2026-06-01',
+        cyclePosition: 6,
+        shift: null,
+        mobile: null,
+        shiftIndex: 2,
+        mobileIndex: 0,
+        shifts: ['M', 'N', 'T'],
+        mobiles: [6],
+        completedBlocksOnMobile: 0,
+      }),
+      '2026-06-01',
+      '2026-06-07',
+    );
+    const byDate = Object.fromEntries(days.map((d) => [d.date, d.code]));
+    expect(byDate['2026-06-01']).toBe('F');
+    expect(byDate['2026-06-02']).toBe('F');
+    expect(byDate['2026-06-03']).toBe('M6');
+    expect(byDate['2026-06-07']).toBe('M6');
+  });
+
   it('projectRange avanza desde el estado hasta el rango pedido', () => {
     const days = projectRange(
       baseInput({

@@ -1,9 +1,78 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
+import { VACATION_DURATIONS } from '@plataforma/shared';
 import { api } from '../lib/api';
 import {
+  daysInRange,
   firstIssueFor,
+  isIsoDate,
   validateDateRange,
 } from '../lib/dateRange';
+import { useLocalStorage } from '../lib/useLocalStorage';
+import { downloadCsv } from '../lib/csv';
+import {
+  DayDetailPanel,
+  InspectorMasterList,
+  ScheduleObjectBar,
+  ShiftCell,
+  SwapInspectorsModal,
+  type AbsenceKind,
+  type ScheduleMode,
+  type ScheduleTab,
+} from '../components/schedule';
+import { Modal, SkeletonTable, useToast } from '../components/ui';
+import {
+  type BoardResponse,
+  type CoverageRow,
+  type DailyTotal,
+  type DayRow,
+  type InspectorRow,
+  MONTHS_ES,
+  SHIFTS,
+  SHIFT_LABEL,
+  cellTone,
+  coverageClass,
+  eachDate,
+  iso,
+  monthBounds,
+  monthLabel,
+  monthSpansHelper,
+  rowKey,
+  shiftMonth,
+  toDateOnly,
+  weekdayLetter,
+} from '../lib/scheduleUtils';
+
+function monthSpans(dates: string[]) {
+  return monthSpansHelper(
+    dates,
+    MONTHS_ES.map((m) => m.toUpperCase()),
+  );
+}
+
+/** La grilla UI no debe cargar el horizonte completo de proyección. */
+const CALENDAR_MAX_DAYS = 62;
+
+function resolveCalendarRange(
+  fromRaw: string,
+  toRaw: string,
+  fallbackAnchor: string,
+): { from: string; to: string } {
+  if (fromRaw && toRaw && isIsoDate(fromRaw) && isIsoDate(toRaw) && fromRaw <= toRaw) {
+    if (daysInRange(fromRaw, toRaw) <= CALENDAR_MAX_DAYS) {
+      return { from: fromRaw, to: toRaw };
+    }
+    return monthBounds(fromRaw);
+  }
+  return monthBounds(fallbackAnchor || iso(new Date()));
+}
+
+function networkErrorMessage(err: unknown): string {
+  if (err instanceof TypeError || (err instanceof Error && err.message === 'Failed to fetch')) {
+    return 'No se pudo completar la consulta. Probá un rango de un mes (‹ ›) o verificá que la API esté en marcha.';
+  }
+  return err instanceof Error ? err.message : 'Error';
+}
 
 type Version = {
   id: string;
@@ -16,127 +85,16 @@ type Version = {
   periodo_hasta?: string;
 };
 
-type DayRow = {
-  fecha_operativa: string;
-  tipo_dia: string;
-  codigo: string;
-  movil: number | null;
-  inspector: string | null;
-  legajo: string | null;
-  posicion_codigo: string;
+type PersistedCalendarFilters = {
+  versionId: string;
+  inspector: string;
+  mobile: string;
 };
 
-type CoverageRow = {
-  fecha_operativa: string;
-  movil: number;
-  turno: string;
-  cantidad_asignada: number;
-  estado: string;
-};
-
-type DailyTotal = {
-  fecha_operativa: string;
-  francos: number;
-  vacaciones: number;
-  enfermedades: number;
-  trabajos: number;
-};
-
-type BoardResponse = {
-  days: DayRow[];
-  coverage: CoverageRow[];
-  daily_totals: DailyTotal[];
-  summary: {
-    huecos: number;
-    solapamientos: number;
-    dias_con_vacaciones: number;
-    asignaciones_vacacion: number;
-  };
-};
-
-const WEEKDAYS = ['D', 'L', 'M', 'X', 'J', 'V', 'S'];
-const MONTHS = [
-  'ENERO',
-  'FEBRERO',
-  'MARZO',
-  'ABRIL',
-  'MAYO',
-  'JUNIO',
-  'JULIO',
-  'AGOSTO',
-  'SEPTIEMBRE',
-  'OCTUBRE',
-  'NOVIEMBRE',
-  'DICIEMBRE',
-];
-const SHIFTS = ['M', 'T', 'N'] as const;
-const SHIFT_LABEL: Record<string, string> = {
-  M: 'Mañana',
-  T: 'Tarde',
-  N: 'Noche',
-};
-
-function weekdayLetter(iso: string) {
-  const d = new Date(iso + 'T12:00:00');
-  return WEEKDAYS[d.getDay()];
-}
-
-function eachDate(from: string, to: string): string[] {
-  if (!from || !to || from > to) return [];
-  const out: string[] = [];
-  const cur = new Date(from + 'T12:00:00');
-  const end = new Date(to + 'T12:00:00');
-  while (cur <= end) {
-    const y = cur.getFullYear();
-    const m = String(cur.getMonth() + 1).padStart(2, '0');
-    const d = String(cur.getDate()).padStart(2, '0');
-    out.push(`${y}-${m}-${d}`);
-    cur.setDate(cur.getDate() + 1);
-  }
-  return out;
-}
-
-/** Agrupa fechas contiguas del mismo mes para el encabezado tipo Excel. */
-function monthSpans(dates: string[]): Array<{ label: string; span: number; key: string }> {
-  const spans: Array<{ label: string; span: number; key: string }> = [];
-  for (const d of dates) {
-    const month = Number(d.slice(5, 7));
-    const year = d.slice(0, 4);
-    const label = `${MONTHS[month - 1]} ${year}`;
-    const last = spans[spans.length - 1];
-    if (last && last.label === label) last.span += 1;
-    else spans.push({ label, span: 1, key: `${year}-${month}` });
-  }
-  return spans;
-}
-
-function cellClass(codigo: string, tipo: string) {
-  if (tipo === 'VACACION' || codigo === 'V') return 'xlsx-v';
-  if (tipo === 'ENFERMEDAD' || codigo === 'EF') return 'xlsx-ef';
-  if (tipo === 'FRANCO' || codigo === 'F') return 'xlsx-f';
-  if (codigo.startsWith('M')) return 'xlsx-m';
-  if (codigo.startsWith('T')) return 'xlsx-t';
-  if (codigo.startsWith('N')) return 'xlsx-n';
-  return '';
-}
-
-function coverageClass(n: number) {
-  if (n === 0) return 'cov-gap';
-  if (n === 1) return 'cov-ok';
-  return 'cov-overlap';
-}
-
-function rowKey(row: DayRow) {
-  return row.legajo || row.inspector || row.posicion_codigo;
-}
-
-/** Fecha calendario YYYY-MM-DD sin corrimiento por zona horaria. */
-function toDateOnly(value?: string | null) {
-  if (!value) return '';
-  const s = String(value);
-  const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
-  return m ? m[1] : s.slice(0, 10);
-}
+const CALENDAR_FILTERS_KEY = 'sv_calendar_filters_v1';
+const CALENDAR_RANGE_KEY = 'sv_calendar_range_v1';
+const CALENDAR_MODE_KEY = 'sv_calendar_mode_v1';
+const ALL_VERSIONS = '__ALL__';
 
 function pickDefaultVersion(data: Version[]) {
   return (
@@ -152,13 +110,13 @@ function normalizeDay(row: DayRow): DayRow {
 
 function versionPriority(v: Version, preferredId: string) {
   if (v.id === preferredId) return 0;
-  if (v.capa === 'PLANIFICADA') return 1;
-  if (v.capa === 'BASE' && v.estado === 'APROBADA_PUBLICADA') return 2;
-  if (v.estado === 'APROBADA_PUBLICADA') return 3;
-  return 4;
+  if (v.capa === 'REAL') return 1;
+  if (v.capa === 'PLANIFICADA') return 2;
+  if (v.capa === 'BASE' && v.estado === 'APROBADA_PUBLICADA') return 3;
+  if (v.estado === 'APROBADA_PUBLICADA') return 4;
+  return 5;
 }
 
-/** Une tableros de varias versiones; la preferida gana en solapes. */
 function mergeBoards(
   entries: Array<{ version: Version; board: BoardResponse }>,
   preferredId: string,
@@ -208,49 +166,84 @@ function mergeBoards(
         (acc, r) => acc + Number(r.vacaciones || 0),
         0,
       ),
-      dias_con_vacaciones: totalRows.filter((r) => Number(r.vacaciones) > 0).length,
+      dias_con_vacaciones: totalRows.filter((r) => Number(r.vacaciones) > 0)
+        .length,
     },
   };
 }
 
-const ALL_VERSIONS = '__ALL__';
-/** Tope de grilla para no congelar el navegador. */
-const CALENDAR_MAX_DAYS = 186;
+function classicCellClass(codigo: string, tipo: string) {
+  const tone = cellTone(codigo, tipo);
+  if (tone === 'vacacion') return 'xlsx-v';
+  if (tone === 'enfermedad') return 'xlsx-ef';
+  if (tone === 'franco') return 'xlsx-f';
+  if (tone === 'manana') return 'xlsx-m';
+  if (tone === 'tarde') return 'xlsx-t';
+  if (tone === 'noche') return 'xlsx-n';
+  return '';
+}
 
-export function CalendarPage() {
+type CalendarLayer = 'planned' | 'real';
+
+export function CalendarPage({ layer = 'planned' }: { layer?: CalendarLayer }) {
+  const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [persistedFilters, setPersistedFilters] =
+    useLocalStorage<PersistedCalendarFilters>(CALENDAR_FILTERS_KEY, {
+      versionId: ALL_VERSIONS,
+      inspector: '',
+      mobile: '',
+    });
+  const [persistedRange, setPersistedRange] = useLocalStorage<{
+    from: string;
+    to: string;
+  }>(CALENDAR_RANGE_KEY, { from: '', to: '' });
+  const [mode, setMode] = useLocalStorage<ScheduleMode>(CALENDAR_MODE_KEY, 'sap');
+
+  const initialRange = resolveCalendarRange(
+    searchParams.get('from') || persistedRange.from || '',
+    searchParams.get('to') || persistedRange.to || '',
+    iso(new Date()),
+  );
+
   const [versions, setVersions] = useState<Version[]>([]);
-  const [versionId, setVersionId] = useState(ALL_VERSIONS);
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
+  const [versionId, setVersionId] = useState(persistedFilters.versionId);
+  const [dateFrom, setDateFrom] = useState(initialRange.from);
+  const [dateTo, setDateTo] = useState(initialRange.to);
   const [board, setBoard] = useState<BoardResponse | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [loadedLabel, setLoadedLabel] = useState('');
-  const [touched, setTouched] = useState({ from: false, to: false });
-  const [filterInspector, setFilterInspector] = useState('');
-  const [filterMobile, setFilterMobile] = useState('');
+  const [filterInspector, setFilterInspector] = useState(
+    persistedFilters.inspector,
+  );
+  const [filterMobile, setFilterMobile] = useState(persistedFilters.mobile);
+  const [tab, setTab] = useState<ScheduleTab>('plan');
+  const [selection, setSelection] = useState<{
+    cell: DayRow;
+    dateFrom: string;
+    dateTo: string;
+  } | null>(null);
+  const [catalogInspectors, setCatalogInspectors] = useState<
+    Array<{ id: string; nombre_completo: string }>
+  >([]);
+  const [swapOpen, setSwapOpen] = useState(false);
+  const [absenceKind, setAbsenceKind] = useState<AbsenceKind | null>(null);
+  const [absenceReason, setAbsenceReason] = useState('');
+  const [vacationDays, setVacationDays] = useState<number>(VACATION_DURATIONS[0]);
+  const [actionBusy, setActionBusy] = useState(false);
 
-  const dataBounds = useMemo(() => {
-    const froms = versions
-      .map((v) => toDateOnly(v.periodo_desde))
-      .filter(Boolean)
-      .sort();
-    const tos = versions
-      .map((v) => toDateOnly(v.periodo_hasta))
-      .filter(Boolean)
-      .sort();
-    if (versionId !== ALL_VERSIONS) {
-      const v = versions.find((x) => x.id === versionId);
-      return {
-        min: toDateOnly(v?.periodo_desde) || froms[0] || '',
-        max: toDateOnly(v?.periodo_hasta) || tos[tos.length - 1] || '',
-      };
-    }
-    return {
-      min: froms[0] || '',
-      max: tos[tos.length - 1] || '',
-    };
-  }, [versions, versionId]);
+  useEffect(() => {
+    setPersistedFilters({
+      versionId,
+      inspector: filterInspector,
+      mobile: filterMobile,
+    });
+  }, [versionId, filterInspector, filterMobile, setPersistedFilters]);
+
+  useEffect(() => {
+    if (dateFrom && dateTo) setPersistedRange({ from: dateFrom, to: dateTo });
+  }, [dateFrom, dateTo, setPersistedRange]);
 
   const dateIssues = useMemo(
     () =>
@@ -260,78 +253,107 @@ export function CalendarPage() {
       }),
     [dateFrom, dateTo],
   );
-
-  const fromError =
-    touched.from || touched.to ? firstIssueFor(dateIssues, 'from') : '';
-  const toError =
-    touched.from || touched.to ? firstIssueFor(dateIssues, 'to') : '';
-  const rangeError = firstIssueFor(dateIssues, 'range');
   const datesValid = dateIssues.length === 0;
+  const rangeError = firstIssueFor(dateIssues, 'range');
 
   useEffect(() => {
-    api<Version[]>('/planning/versions')
-      .then((data) => {
-        setVersions(data);
-        const preferred = pickDefaultVersion(data);
-        const froms = data
-          .map((v) => toDateOnly(v.periodo_desde))
-          .filter(Boolean)
-          .sort();
-        const tos = data
-          .map((v) => toDateOnly(v.periodo_hasta))
-          .filter(Boolean)
-          .sort();
-        const from = froms[0] || toDateOnly(preferred?.periodo_desde);
-        let to = tos[tos.length - 1] || toDateOnly(preferred?.periodo_hasta);
-        if (from && to) {
-          const span = validateDateRange(from, to, {
-            required: true,
-            maxDays: CALENDAR_MAX_DAYS,
-          });
-          if (span.length) {
-            // Acota al máximo permitido desde el inicio del período.
-            const cur = new Date(from + 'T12:00:00');
-            cur.setDate(cur.getDate() + CALENDAR_MAX_DAYS - 1);
-            const y = cur.getFullYear();
-            const m = String(cur.getMonth() + 1).padStart(2, '0');
-            const d = String(cur.getDate()).padStart(2, '0');
-            to = `${y}-${m}-${d}`;
-          }
-        }
-        setVersionId(ALL_VERSIONS);
-        if (from) setDateFrom(from);
-        if (to) setDateTo(to);
-      })
-      .catch((e) => setError(e.message));
+    // Si quedó un horizonte enorme de sesiones previas, forzar mes.
+    const clamped = resolveCalendarRange(dateFrom, dateTo, iso(new Date()));
+    if (clamped.from !== dateFrom || clamped.to !== dateTo) {
+      setDateFrom(clamped.from);
+      setDateTo(clamped.to);
+      setPersistedRange(clamped);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function refreshVersions(opts?: { preserveRange?: boolean }) {
+    const requestedLayer = layer === 'real' ? 'REAL' : 'PLANIFICADA';
+    const requested = await api<Version[]>(`/planning/versions?capa=${requestedLayer}`);
+    let data: Version[];
+    if (layer === 'real') {
+      const planVersions = await api<Version[]>('/planning/versions?capa=PLANIFICADA');
+      data = [...requested, ...planVersions];
+    } else {
+      data = requested.length ? requested : await api<Version[]>('/planning/versions?capa=BASE');
+    }
+    setVersions(data);
+    setVersionId(ALL_VERSIONS);
+
+    if (opts?.preserveRange) return data;
+
+    const qsFrom = searchParams.get('from') || '';
+    const qsTo = searchParams.get('to') || '';
+    if (qsFrom && qsTo) {
+      const clamped = resolveCalendarRange(qsFrom, qsTo, qsFrom);
+      setDateFrom(clamped.from);
+      setDateTo(clamped.to);
+      return data;
+    }
+    if (dateFrom && dateTo) return data;
+
+    const preferred = pickDefaultVersion(data);
+    const anchor =
+      toDateOnly(preferred?.periodo_desde) || '2026-06-01';
+    const b = monthBounds(anchor);
+    setDateFrom(b.from);
+    setDateTo(b.to);
+    return data;
+  }
+
+  useEffect(() => {
+    refreshVersions().catch((e) => {
+      const msg = networkErrorMessage(e);
+      setError(msg);
+      toast.error(msg);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layer]);
 
   async function loadBoard(
     selectedVersionId: string,
     from: string,
     to: string,
+    overrideVersions?: Version[],
   ) {
+    const versionsList = overrideVersions ?? versions;
     const issues = validateDateRange(from, to, {
       required: true,
       maxDays: CALENDAR_MAX_DAYS,
     });
     if (issues.length) {
-      setTouched({ from: true, to: true });
       setError(issues[0].message);
       setBoard(null);
       setLoadedLabel('');
       return;
     }
-    if (!versions.length) return;
+    if (!versionsList.length) {
+      setError(
+        'No hay versiones publicadas todavía. Andá a Proyección → "Generar PLANIFICADA".',
+      );
+      setBoard(null);
+      setLoadedLabel('');
+      return;
+    }
 
     setBusy(true);
     setError('');
     const q = new URLSearchParams({ date_from: from, date_to: to });
 
     try {
-      const targets =
-        selectedVersionId === ALL_VERSIONS
-          ? versions
-          : versions.filter((v) => v.id === selectedVersionId);
+      let targets: Version[];
+      if (selectedVersionId === ALL_VERSIONS) {
+        if (layer === 'real') {
+          const realVersions = versionsList.filter((v) => v.capa === 'REAL');
+          const planVersions = versionsList.filter((v) => v.capa === 'PLANIFICADA');
+          const bestPlan = pickDefaultVersion(planVersions) ?? planVersions[0];
+          targets = [...realVersions, ...(bestPlan ? [bestPlan] : [])];
+        } else {
+          targets = versionsList.slice(0, 1);
+        }
+      } else {
+        targets = versionsList.filter((v) => v.id === selectedVersionId);
+      }
 
       if (!targets.length) {
         setError('No hay versión seleccionada');
@@ -350,7 +372,7 @@ export function CalendarPage() {
 
       const preferred =
         selectedVersionId === ALL_VERSIONS
-          ? pickDefaultVersion(versions)?.id || versions[0].id
+          ? (versionsList.find((v) => v.capa === 'REAL')?.id ?? versionsList[0].id)
           : selectedVersionId;
 
       const merged =
@@ -370,6 +392,7 @@ export function CalendarPage() {
           : mergeBoards(results, preferred);
 
       setBoard(merged);
+      setSelection(null);
       const used = results
         .filter((r) => r.board.days.length > 0)
         .map((r) => `${r.version.capa} ${r.version.codigo}`);
@@ -379,7 +402,7 @@ export function CalendarPage() {
           : 'Sin días en el rango para las versiones consultadas',
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Error');
+      setError(networkErrorMessage(err));
       setBoard(null);
       setLoadedLabel('');
     } finally {
@@ -387,35 +410,42 @@ export function CalendarPage() {
     }
   }
 
-  async function load(e?: FormEvent) {
-    e?.preventDefault();
-    setTouched({ from: true, to: true });
-    await loadBoard(versionId, dateFrom, dateTo);
-  }
-
   useEffect(() => {
-    if (versions.length && dateFrom && dateTo) {
-      const issues = validateDateRange(dateFrom, dateTo, {
-        required: true,
-        maxDays: CALENDAR_MAX_DAYS,
-      });
-      if (!issues.length) void loadBoard(versionId, dateFrom, dateTo);
+    if (versions.length && dateFrom && dateTo && datesValid) {
+      void loadBoard(versionId, dateFrom, dateTo);
     }
-    // Carga inicial al tener versiones + rango; Consultar dispara load() después.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [versions]);
+
+  function applyRange(from: string, to: string) {
+    setDateFrom(from);
+    setDateTo(to);
+    setSearchParams((prev) => {
+      prev.set('from', from);
+      prev.set('to', to);
+      return prev;
+    });
+    if (versions.length) void loadBoard(versionId, from, to);
+  }
+
+  function goMonth(delta: number) {
+    const b = shiftMonth(dateFrom || iso(new Date()), delta);
+    applyRange(b.from, b.to);
+  }
 
   const dates = useMemo(() => {
     if (datesValid) return eachDate(dateFrom, dateTo);
     if (!board) return [] as string[];
-    return [...new Set(board.days.map((d) => toDateOnly(d.fecha_operativa)))].sort();
+    return [
+      ...new Set(board.days.map((d) => toDateOnly(d.fecha_operativa))),
+    ].sort();
   }, [board, dateFrom, dateTo, datesValid]);
 
   const months = useMemo(() => monthSpans(dates), [dates]);
 
   const allInspectors = useMemo(() => {
-    if (!board) return [] as Array<{ key: string; name: string; legajo: string }>;
-    const map = new Map<string, { key: string; name: string; legajo: string }>();
+    if (!board) return [] as InspectorRow[];
+    const map = new Map<string, InspectorRow>();
     for (const row of board.days) {
       const key = rowKey(row);
       const existing = map.get(key);
@@ -433,8 +463,8 @@ export function CalendarPage() {
         });
       }
     }
-    return [...map.values()].sort((a, b) =>
-      a.legajo.localeCompare(b.legajo) || a.name.localeCompare(b.name),
+    return [...map.values()].sort(
+      (a, b) => a.legajo.localeCompare(b.legajo) || a.name.localeCompare(b.name),
     );
   }, [board]);
 
@@ -456,7 +486,7 @@ export function CalendarPage() {
   }, [allInspectors, filterInspector, mobileNumber, board]);
 
   const coverageMobiles = useMemo(
-    () => (mobileNumber != null ? [mobileNumber] : [1, 2, 3, 4, 5]),
+    () => (mobileNumber != null ? [mobileNumber] : [1, 2, 3, 4, 5, 6, 7]),
     [mobileNumber],
   );
 
@@ -475,7 +505,6 @@ export function CalendarPage() {
   function visibleCell(cell: DayRow | undefined): DayRow | undefined {
     if (!cell) return undefined;
     if (mobileNumber == null) return cell;
-    // Con filtro de móvil: mostrar trabajo de ese móvil; francos/V/EF del inspector filtrado.
     if (cell.tipo_dia === 'TRABAJO' || cell.codigo.match(/^[MTN]\d/)) {
       return Number(cell.movil) === mobileNumber ? cell : undefined;
     }
@@ -494,203 +523,697 @@ export function CalendarPage() {
     return map;
   }, [board]);
 
-  const totalsMap = useMemo(() => {
-    const map = new Map<string, DailyTotal>();
-    if (!board) return map;
-    for (const row of board.daily_totals) {
-      const fecha = toDateOnly(row.fecha_operativa);
-      map.set(fecha, { ...row, fecha_operativa: fecha });
+  const todayIso = iso(new Date());
+  const todayByKey = useMemo(() => {
+    const map = new Map<string, DayRow | undefined>();
+    for (const insp of allInspectors) {
+      map.set(insp.key, visibleCell(cellMap.get(`${insp.key}|${todayIso}`)));
     }
     return map;
-  }, [board]);
+  }, [allInspectors, cellMap, todayIso, mobileNumber]);
+
+  const versionOptions = useMemo(
+    () => [
+      {
+        id: ALL_VERSIONS,
+        label: layer === 'real' ? 'Cronograma real vigente' : 'Cuadratura ideal',
+      },
+      ...versions.map((v) => ({
+        id: v.id,
+        label: `${v.capa} · ${v.codigo} v${v.numero_version}`,
+      })),
+    ],
+    [versions, layer],
+  );
+
+  function exportInspectorsCsv() {
+    if (!board || !inspectors.length || !dates.length) {
+      toast.info('Nada para exportar todavía.');
+      return;
+    }
+    const header = ['#', 'Legajo', 'Inspector', ...dates];
+    const rows: unknown[][] = [header];
+    inspectors.forEach((insp, idx) => {
+      const line: unknown[] = [idx + 1, insp.legajo, insp.name];
+      for (const d of dates) {
+        const cell = visibleCell(cellMap.get(`${insp.key}|${d}`));
+        line.push(cell?.codigo ?? '');
+      }
+      rows.push(line);
+    });
+    downloadCsv(`cronograma-${dateFrom}_${dateTo}.csv`, rows);
+    toast.success('Archivo CSV descargado.');
+  }
+
+  function exportCoverageCsv() {
+    if (!board || !dates.length) {
+      toast.info('Nada para exportar todavía.');
+      return;
+    }
+    const header = ['Móvil', 'Turno', ...dates];
+    const rows: unknown[][] = [header];
+    for (const m of coverageMobiles) {
+      for (const s of SHIFTS) {
+        const line: unknown[] = [`Móvil ${m}`, SHIFT_LABEL[s]];
+        for (const d of dates) {
+          line.push(coverageMap.get(`${d}|${m}|${s}`) ?? '');
+        }
+        rows.push(line);
+      }
+    }
+    downloadCsv(`cobertura-${dateFrom}_${dateTo}.csv`, rows);
+    toast.success('Cobertura exportada a CSV.');
+  }
+
+  function onVersionChange(id: string) {
+    setVersionId(id);
+    if (datesValid) void loadBoard(id, dateFrom, dateTo);
+  }
 
   useEffect(() => {
-    if (
-      filterInspector &&
-      allInspectors.length &&
-      !allInspectors.some((i) => i.key === filterInspector)
-    ) {
-      setFilterInspector('');
+    if (layer !== 'real') return;
+    api<Array<{ id: string; nombre_completo: string }>>('/operations/inspectors')
+      .then(setCatalogInspectors)
+      .catch(() => setCatalogInspectors([]));
+  }, [layer]);
+
+  function selectCell(
+    cell: DayRow,
+    date: string,
+    opts?: { extend?: boolean },
+  ) {
+    if (layer === 'real' && selection && rowKey(selection.cell) === rowKey(cell)) {
+      if (date === selection.dateFrom && date === selection.dateTo) {
+        return;
+      }
+      const anchor = selection.dateFrom;
+      const lo = anchor <= date ? anchor : date;
+      const hi = anchor <= date ? date : anchor;
+      setSelection({ cell, dateFrom: lo, dateTo: hi });
+      return;
     }
-  }, [allInspectors, filterInspector]);
+    setSelection({ cell, dateFrom: date, dateTo: date });
+  }
+
+  function isDateInSelection(inspKey: string, date: string) {
+    if (!selection || rowKey(selection.cell) !== inspKey) return false;
+    return date >= selection.dateFrom && date <= selection.dateTo;
+  }
+
+  async function confirmSwap(payload: {
+    inspectorBId: string;
+    reason: string;
+  }) {
+    if (!selection?.cell.inspector_id) return;
+    setActionBusy(true);
+    try {
+      await api('/schedule-engine/swap', {
+        method: 'POST',
+        body: JSON.stringify({
+          inspector_a_id: selection.cell.inspector_id,
+          inspector_b_id: payload.inspectorBId,
+          date_from: selection.dateFrom,
+          date_to: selection.dateTo,
+          reason: payload.reason,
+          rematerialize: true,
+        }),
+      });
+      toast.success('Enroque aplicado en cronograma real. La ideal no cambió.');
+      setSwapOpen(false);
+      const fresh = await refreshVersions({ preserveRange: true });
+      if (fresh?.length) await loadBoard(ALL_VERSIONS, dateFrom, dateTo, fresh);
+    } catch (err) {
+      toast.error(networkErrorMessage(err));
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  const DEMAND_WORK: Record<number, number> = { 7: 0, 14: 1, 21: 2, 28: 1, 35: 2 };
+
+  function offsetDate(base: string, days: number) {
+    const d = new Date(base + 'T00:00:00');
+    d.setDate(d.getDate() + days);
+    return d.toISOString().slice(0, 10);
+  }
+
+  function vacationValidation(): { ok: boolean; errors: string[] } {
+    if (!selection) return { ok: false, errors: ['Sin selección'] };
+    const inspKey = rowKey(selection.cell);
+    const errors: string[] = [];
+
+    for (let i = 1; i <= 3; i++) {
+      const prevDate = offsetDate(selection.dateFrom, -i);
+      const prevCell = cellMap.get(`${inspKey}|${prevDate}`);
+      if (!prevCell || (prevCell.tipo_dia !== 'FRANCO' && prevCell.codigo !== 'F')) {
+        errors.push(
+          `RN-021: Las vacaciones deben empezar después de 3 francos. El día ${prevDate} no es franco.`,
+        );
+        break;
+      }
+    }
+    return { ok: errors.length === 0, errors };
+  }
+
+  function vacationSummary() {
+    if (!selection) return null;
+    const demand = DEMAND_WORK[vacationDays] ?? 0;
+    const vacEnd = offsetDate(selection.dateFrom, vacationDays - 1);
+    const demandStart = demand > 0 ? offsetDate(selection.dateFrom, vacationDays) : null;
+    const demandEnd = demand > 0 ? offsetDate(selection.dateFrom, vacationDays + demand - 1) : null;
+    const francoPost = offsetDate(selection.dateFrom, vacationDays + demand);
+    return { demand, vacEnd, demandStart, demandEnd, francoPost };
+  }
+
+  async function confirmAbsence() {
+    if (!selection?.cell.inspector_id || !absenceKind) return;
+    if (absenceReason.trim().length < 5) {
+      toast.info('Indicá un motivo de al menos 5 caracteres.');
+      return;
+    }
+
+    if (absenceKind === 'VACACION') {
+      const { ok, errors } = vacationValidation();
+      if (!ok) {
+        toast.error(errors[0]);
+        return;
+      }
+    }
+
+    setActionBusy(true);
+    try {
+      if (absenceKind === 'VACACION') {
+        const sum = vacationSummary()!;
+        const inspId = selection.cell.inspector_id;
+        const reason = absenceReason.trim();
+
+        const vacResult = await api<{ id: string }>('/vacations', {
+          method: 'POST',
+          body: JSON.stringify({
+            inspectorId: inspId,
+            dateFrom: selection.dateFrom,
+            days: vacationDays,
+            reason,
+            layer: 'REAL',
+          }),
+        });
+
+        await api('/schedule-engine/absence', {
+          method: 'POST',
+          body: JSON.stringify({
+            inspector_id: inspId,
+            date_from: selection.dateFrom,
+            date_to: sum.vacEnd,
+            kind: 'VACACION',
+            reason,
+            rematerialize: false,
+          }),
+        });
+
+        await api('/schedule-engine/absence', {
+          method: 'POST',
+          body: JSON.stringify({
+            inspector_id: inspId,
+            date_from: sum.francoPost,
+            date_to: sum.francoPost,
+            kind: 'FERIADO',
+            reason: 'Franco post-vacación (RN-021/022/023)',
+            rematerialize: false,
+          }),
+        });
+
+        // applyReal solo copia el rango pedido. Hay que materializar V + demanda + 1F,
+        // no únicamente el franco posterior.
+        await api('/schedule-engine/apply-real', {
+          method: 'POST',
+          body: JSON.stringify({
+            date_from: selection.dateFrom,
+            date_to: sum.francoPost,
+          }),
+        });
+
+        if (sum.demand > 0 && vacResult?.id) {
+          toast.info(
+            `Vacación registrada. Quedan ${sum.demand} trabajo${sum.demand > 1 ? 's' : ''} a demanda por asignar (ver Vacaciones y licencias).`,
+          );
+        }
+      } else {
+        await api('/schedule-engine/absence', {
+          method: 'POST',
+          body: JSON.stringify({
+            inspector_id: selection.cell.inspector_id,
+            date_from: selection.dateFrom,
+            date_to: selection.dateTo,
+            kind: absenceKind,
+            reason: absenceReason.trim(),
+            rematerialize: true,
+          }),
+        });
+      }
+      toast.success(`${absenceKind} registrada en cronograma real.`);
+      setAbsenceKind(null);
+      setAbsenceReason('');
+      const fresh = await refreshVersions({ preserveRange: true });
+      if (fresh?.length) await loadBoard(ALL_VERSIONS, dateFrom, dateTo, fresh);
+    } catch (err) {
+      toast.error(networkErrorMessage(err));
+    } finally {
+      setActionBusy(false);
+    }
+  }
 
   return (
-    <div className="stack">
+    <div className="stack sap-page">
       <header className="page-header">
         <div>
-          <h1>Cronograma de turnos</h1>
-          <p>Vista operativa tipo planilla: inspectores × fechas, con cuadro de cobertura.</p>
+          <h1>{layer === 'real' ? 'Cronograma real' : 'Cronograma planificado'}</h1>
+          <p>
+            {layer === 'real'
+              ? 'Gestión diaria de enroques, francos, coberturas, vacaciones y licencias sin alterar la cuadratura ideal.'
+              : 'Cuadratura ideal por defecto: turnos, móviles y francos previstos para cada inspector.'}
+          </p>
         </div>
       </header>
 
+      {layer === 'real' ? (
+        <section className="workflow-actions no-print" aria-label="Acciones del cronograma real">
+          <Link className="workflow-action" to="/huecos">
+            <strong>Enroques y coberturas</strong>
+            <span>Resolver huecos y reemplazos del día.</span>
+          </Link>
+          <Link className="workflow-action" to="/vacaciones">
+            <strong>Vacaciones y licencias</strong>
+            <span>Registrar ausencias y asignaciones temporales.</span>
+          </Link>
+          <Link className="workflow-action" to="/proyeccion">
+            <strong>Actualizar cronograma real</strong>
+            <span>Materializar las novedades operativas registradas.</span>
+          </Link>
+        </section>
+      ) : (
+        <section className="workflow-note no-print">
+          <strong>Referencia protegida</strong>
+          <span>Los cambios del día se gestionan en Cronograma real y no modifican esta secuencia.</span>
+          <Link to="/aprobacion">Revisar y aprobar</Link>
+        </section>
+      )}
+
       {error ? <div className="error-box">{error}</div> : null}
 
-      <section className="panel">
-        <form className="filters" onSubmit={load} noValidate>
-          <div className="field" style={{ minWidth: 320 }}>
-            <label htmlFor="version">Versión</label>
-            <select
-              id="version"
-              value={versionId}
-              onChange={(e) => setVersionId(e.target.value)}
-            >
-              <option value={ALL_VERSIONS}>Todas (unir capas del rango)</option>
-              {versions.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.capa} · {v.codigo} v{v.numero_version} · {v.estado}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field">
-            <label htmlFor="from">Desde</label>
-            <input
-              id="from"
-              type="date"
-              required
-              max={dateTo || undefined}
-              value={dateFrom}
-              aria-invalid={Boolean(fromError)}
-              aria-describedby={fromError ? 'from-error' : undefined}
-              className={fromError ? 'input-invalid' : undefined}
-              onBlur={() => setTouched((t) => ({ ...t, from: true }))}
-              onChange={(e) => setDateFrom(e.target.value)}
-            />
-            {fromError ? (
-              <p id="from-error" className="field-error" role="alert">
-                {fromError}
-              </p>
-            ) : null}
-          </div>
-          <div className="field">
-            <label htmlFor="to">Hasta</label>
-            <input
-              id="to"
-              type="date"
-              required
-              min={dateFrom || undefined}
-              value={dateTo}
-              aria-invalid={Boolean(toError)}
-              aria-describedby={toError ? 'to-error' : undefined}
-              className={toError ? 'input-invalid' : undefined}
-              onBlur={() => setTouched((t) => ({ ...t, to: true }))}
-              onChange={(e) => setDateTo(e.target.value)}
-            />
-            {toError ? (
-              <p id="to-error" className="field-error" role="alert">
-                {toError}
-              </p>
-            ) : null}
-          </div>
-          <div className="field">
-            <label htmlFor="inspector">Inspector</label>
-            <select
-              id="inspector"
-              value={filterInspector}
-              onChange={(e) => setFilterInspector(e.target.value)}
+      <ScheduleObjectBar
+        monthLabel={monthLabel(dateFrom || iso(new Date()))}
+        onPrevMonth={() => goMonth(-1)}
+        onNextMonth={() => goMonth(1)}
+        onThisMonth={() => {
+          const b = monthBounds(iso(new Date()));
+          applyRange(b.from, b.to);
+        }}
+        versionId={versionId}
+        versions={versionOptions}
+        onVersionChange={onVersionChange}
+        primaryTabLabel={layer === 'real' ? 'Detalle diario' : 'Planificación'}
+        tab={tab}
+        onTabChange={setTab}
+        mode={mode}
+        onModeChange={setMode}
+        busy={busy}
+        onRefresh={() => void loadBoard(versionId, dateFrom, dateTo)}
+        actions={
+          <>
+            <button
+              type="button"
+              className="btn secondary sm"
+              onClick={exportInspectorsCsv}
               disabled={!board}
             >
-              <option value="">Todos</option>
-              {allInspectors.map((i) => (
-                <option key={i.key} value={i.key}>
-                  {i.name}
-                  {i.legajo ? ` (${i.legajo})` : ''}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field">
-            <label htmlFor="mobile">Móvil</label>
-            <select
-              id="mobile"
-              value={filterMobile}
-              onChange={(e) => setFilterMobile(e.target.value)}
+              CSV
+            </button>
+            <button
+              type="button"
+              className="btn secondary sm"
+              onClick={() => window.print()}
               disabled={!board}
             >
-              <option value="">Todos</option>
-              {[1, 2, 3, 4, 5].map((n) => (
-                <option key={n} value={String(n)}>
-                  Móvil {n}
-                </option>
-              ))}
-            </select>
-          </div>
-          <button
-            className="btn"
-            type="submit"
-            disabled={busy || !versions.length || !datesValid}
-          >
-            {busy ? 'Cargando…' : 'Consultar'}
-          </button>
-          {(filterInspector || filterMobile) && board ? (
-            <button
-              className="btn secondary"
-              type="button"
-              onClick={() => {
-                setFilterInspector('');
-                setFilterMobile('');
-              }}
-            >
-              Limpiar filtros
+              PDF
             </button>
-          ) : null}
-          {versionId !== ALL_VERSIONS ? (
-            <button
-              className="btn secondary"
-              type="button"
-              disabled={busy}
-              onClick={() => {
-                const v = versions.find((x) => x.id === versionId);
-                if (!v) return;
-                const from = toDateOnly(v.periodo_desde);
-                const to = toDateOnly(v.periodo_hasta);
-                setTouched({ from: true, to: true });
-                setDateFrom(from);
-                setDateTo(to);
-                void loadBoard(versionId, from, to);
-              }}
-            >
-              Período de la versión
-            </button>
-          ) : null}
-        </form>
-        {rangeError ? (
-          <p className="filters-errors" role="alert">
-            {rangeError}
-          </p>
-        ) : null}
-        {loadedLabel ? (
-          <p className="muted" style={{ margin: '0.65rem 0 0' }}>
-            {loadedLabel}
-            {dataBounds.min && dataBounds.max
-              ? ` · Datos en versiones: ${dataBounds.min} → ${dataBounds.max}`
-              : ''}
-          </p>
-        ) : null}
-      </section>
+          </>
+        }
+      />
 
-      {board ? (
-        <>
-          <section className="panel summary-strip">
-            <div>
-              <strong>{board.summary.huecos}</strong>
-              <span>Huecos (0)</span>
+      {!versions.length ? (
+        <section className="panel">
+          <p className="muted" style={{ margin: 0 }}>
+            {layer === 'real'
+              ? 'Todavía no hay un cronograma real para este período. '
+              : 'Todavía no hay una cuadratura ideal publicada. '}
+            <Link to="/proyeccion">Ir a generación de cronogramas</Link>.
+          </p>
+        </section>
+      ) : null}
+
+      {rangeError ? (
+        <p className="filters-errors" role="alert">
+          {rangeError}
+        </p>
+      ) : null}
+
+      {busy && !board ? (
+        <section className="panel">
+          <table className="data">
+            <tbody>
+              <SkeletonTable cols={6} rows={6} />
+            </tbody>
+          </table>
+        </section>
+      ) : null}
+
+      {board && mode === 'sap' && tab === 'plan' ? (
+        <div className={`sap-shell${selection ? ' with-detail' : ''}`}>
+          <InspectorMasterList
+            inspectors={allInspectors}
+            selectedKey={filterInspector}
+            onSelect={setFilterInspector}
+            todayByKey={todayByKey}
+            todayIso={todayIso}
+          />
+
+          <section className="sap-board panel">
+            <div className="sap-board-meta muted">
+              {loadedLabel || `${dateFrom} → ${dateTo}`}
+              {filterMobile ? ` · Móvil ${filterMobile}` : ''}
+              {layer === 'real' ? (
+                <span> · Click 2.ª celda del mismo inspector para rango</span>
+              ) : null}
+              <div className="sap-board-filters">
+                <label>
+                  Móvil
+                  <select
+                    value={filterMobile}
+                    onChange={(e) => setFilterMobile(e.target.value)}
+                  >
+                    <option value="">Todos</option>
+                    {[1, 2, 3, 4, 5, 6, 7].map((n) => (
+                      <option key={n} value={String(n)}>
+                        {n}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
             </div>
-            <div>
-              <strong>{board.summary.solapamientos}</strong>
-              <span>Solapamientos (2)</span>
+
+            {board.summary ? (
+              <div className="summary-strip sap-summary">
+                <div>
+                  <strong>{board.summary.huecos}</strong>
+                  <span>Huecos</span>
+                </div>
+                <div>
+                  <strong>{board.summary.solapamientos}</strong>
+                  <span>Solapamientos</span>
+                </div>
+                <div>
+                  <strong>{board.summary.asignaciones_vacacion}</strong>
+                  <span>Días en vacaciones</span>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="sap-legend" aria-label="Leyenda">
+              <span className="sap-chip-manana">M mañana</span>
+              <span className="sap-chip-tarde">T tarde</span>
+              <span className="sap-chip-noche">N noche</span>
+              <span className="sap-chip-franco">F franco</span>
+              <span className="sap-chip-vacacion">V vacaciones</span>
+              <span className="sap-chip-enfermedad">EF enfermedad</span>
             </div>
-            <div>
-              <strong>{board.summary.asignaciones_vacacion}</strong>
-              <span>Días-inspector en vacaciones</span>
-            </div>
-            <div>
-              <strong>{board.summary.dias_con_vacaciones}</strong>
-              <span>Días calendario con V</span>
-            </div>
+
+            {inspectors.length === 0 ? (
+              <p className="muted">Ningún inspector coincide con los filtros.</p>
+            ) : (
+              <div className="sap-grid-scroll">
+                <table className="sap-grid">
+                  <thead>
+                    <tr>
+                      <th className="sap-sticky-name">Inspector</th>
+                      {dates.map((d) => (
+                        <th key={d} className={d === todayIso ? 'is-today' : undefined}>
+                          <span className="sap-wd">{weekdayLetter(d)}</span>
+                          <span className="sap-day">{d.slice(8)}</span>
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {inspectors.map((insp) => (
+                      <tr key={insp.key}>
+                        <th className="sap-sticky-name">
+                          <div className="sap-insp-name">{insp.name}</div>
+                          {insp.legajo ? (
+                            <div className="sap-insp-legajo">{insp.legajo}</div>
+                          ) : null}
+                        </th>
+                        {dates.map((d) => {
+                          const cell = visibleCell(
+                            cellMap.get(`${insp.key}|${d}`),
+                          );
+                          if (!cell) {
+                            return (
+                              <td key={`${insp.key}-${d}`} className="sap-empty" />
+                            );
+                          }
+                          const selected =
+                            selection != null &&
+                            rowKey(selection.cell) === insp.key &&
+                            d === selection.dateFrom;
+                          const inRange = isDateInSelection(insp.key, d);
+                          return (
+                            <td key={`${insp.key}-${d}`}>
+                              <ShiftCell
+                                cell={cell}
+                                date={d}
+                                selected={selected}
+                                rangeSelected={inRange && !selected}
+                                onSelect={selectCell}
+                              />
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </section>
 
-          <section className="panel legend-strip" aria-label="Leyenda de códigos">
+          <DayDetailPanel
+            cell={selection?.cell ?? null}
+            dateFrom={selection?.dateFrom ?? null}
+            dateTo={selection?.dateTo ?? null}
+            editable={layer === 'real'}
+            busy={actionBusy}
+            onClose={() => setSelection(null)}
+            onSwap={() => setSwapOpen(true)}
+            onAbsence={(kind) => {
+              setAbsenceKind(kind);
+              setAbsenceReason('');
+            }}
+          />
+        </div>
+      ) : null}
+
+      <SwapInspectorsModal
+        open={swapOpen && layer === 'real'}
+        source={selection?.cell ?? null}
+        dateFrom={selection?.dateFrom ?? ''}
+        dateTo={selection?.dateTo ?? selection?.dateFrom ?? ''}
+        inspectors={catalogInspectors}
+        busy={actionBusy}
+        onClose={() => setSwapOpen(false)}
+        onConfirm={confirmSwap}
+      />
+
+      <Modal
+        open={!!absenceKind && layer === 'real'}
+        onClose={() => {
+          if (!actionBusy) setAbsenceKind(null);
+        }}
+        title={absenceKind ? `Registrar ${absenceKind}` : 'Ausencia'}
+        description={
+          selection
+            ? `${selection.cell.inspector ?? 'Inspector'} · ${selection.dateFrom}${
+                selection.dateTo !== selection.dateFrom
+                  ? ` → ${selection.dateTo}`
+                  : ''
+              }`
+            : undefined
+        }
+        footer={
+          <>
+            <button
+              type="button"
+              className="btn secondary"
+              disabled={actionBusy}
+              onClick={() => setAbsenceKind(null)}
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              className="btn amber"
+              disabled={
+                actionBusy ||
+                absenceReason.trim().length < 5 ||
+                (absenceKind === 'VACACION' && !vacationValidation().ok)
+              }
+              onClick={() => void confirmAbsence()}
+            >
+              {actionBusy ? 'Guardando…' : 'Confirmar'}
+            </button>
+          </>
+        }
+      >
+        {absenceKind === 'VACACION' && selection ? (
+          <div style={{ marginBottom: '0.75rem' }}>
+            <div className="field">
+              <label htmlFor="vacation-days">Días de vacaciones a otorgar</label>
+              <select
+                id="vacation-days"
+                value={vacationDays}
+                onChange={(e) => setVacationDays(Number(e.target.value))}
+              >
+                {VACATION_DURATIONS.map((d) => (
+                  <option key={d} value={d}>
+                    {d} días{DEMAND_WORK[d] ? ` (+${DEMAND_WORK[d]} trabajo a demanda)` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {(() => {
+              const sum = vacationSummary();
+              const val = vacationValidation();
+              if (!sum) return null;
+              return (
+                <div style={{ marginTop: '0.75rem' }}>
+                  <p style={{ margin: '0 0 0.25rem' }}>
+                    <strong>Secuencia según RN-021/022/023:</strong>
+                  </p>
+                  <table style={{ fontSize: '0.85rem', width: '100%', marginBottom: '0.5rem' }}>
+                    <tbody>
+                      <tr>
+                        <td style={{ padding: '2px 8px 2px 0', whiteSpace: 'nowrap' }}>3F (previos):</td>
+                        <td>{offsetDate(selection.dateFrom, -3)} → {offsetDate(selection.dateFrom, -1)}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ padding: '2px 8px 2px 0', whiteSpace: 'nowrap' }}><strong>{vacationDays}V:</strong></td>
+                        <td><strong>{selection.dateFrom} → {sum.vacEnd}</strong></td>
+                      </tr>
+                      {sum.demand > 0 ? (
+                        <tr>
+                          <td style={{ padding: '2px 8px 2px 0', whiteSpace: 'nowrap' }}>
+                            {sum.demand} trabajo{sum.demand > 1 ? 's' : ''} a demanda:
+                          </td>
+                          <td>{sum.demandStart} → {sum.demandEnd}</td>
+                        </tr>
+                      ) : null}
+                      <tr>
+                        <td style={{ padding: '2px 8px 2px 0', whiteSpace: 'nowrap' }}>1F (post):</td>
+                        <td>{sum.francoPost}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  {sum.demand > 0 ? (
+                    <p className="muted" style={{ margin: '0 0 0.5rem', fontSize: '0.8rem' }}>
+                      Los trabajos a demanda se asignan desde "Vacaciones y licencias" una vez confirmada la vacación.
+                    </p>
+                  ) : null}
+                  {!val.ok ? (
+                    <p className="error-box" style={{ margin: '0.5rem 0 0' }}>
+                      {val.errors[0]}
+                    </p>
+                  ) : (
+                    <p className="success-box" style={{ margin: '0.5rem 0 0' }}>
+                      Los 3 francos previos se verificaron correctamente.
+                    </p>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+        ) : null}
+
+        <div className="field">
+          <label htmlFor="absence-reason">Motivo (mín. 5 caracteres)</label>
+          <textarea
+            id="absence-reason"
+            rows={3}
+            value={absenceReason}
+            onChange={(e) => setAbsenceReason(e.target.value)}
+            placeholder="Motivo operativo"
+          />
+        </div>
+        <p className="muted" style={{ marginBottom: 0 }}>
+          Se registra como overlay en cronograma real. La cuadratura ideal no se
+          modifica.
+        </p>
+      </Modal>
+
+      {board && mode === 'sap' && tab === 'coverage' ? (
+        <section className="panel">
+          <h2 style={{ marginTop: 0, fontFamily: 'var(--font-display)' }}>
+            Cuadro de cobertura
+          </h2>
+          <p className="muted">
+            0 = hueco · 1 = cobertura normal · 2 = solapamiento
+          </p>
+          <div className="xlsx-scroll">
+            <table className="xlsx-grid coverage-grid">
+              <thead>
+                <tr>
+                  <th className="sticky-col">Móvil</th>
+                  <th className="sticky-col-2">Turno</th>
+                  {dates.map((d) => (
+                    <th key={`c-${d}`}>{d.slice(8)}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {coverageMobiles.flatMap((mobile) =>
+                  SHIFTS.map((shift, i) => (
+                    <tr key={`${mobile}-${shift}`}>
+                      {i === 0 ? (
+                        <td className="sticky-col" rowSpan={3}>
+                          {mobile}
+                        </td>
+                      ) : null}
+                      <td className="sticky-col-2">{SHIFT_LABEL[shift]}</td>
+                      {dates.map((d) => {
+                        const n = coverageMap.get(`${d}|${mobile}|${shift}`);
+                        return (
+                          <td
+                            key={`${d}-${mobile}-${shift}`}
+                            className={
+                              typeof n === 'number' ? coverageClass(n) : undefined
+                            }
+                          >
+                            {n ?? ''}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  )),
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+
+      {board && mode === 'classic' ? (
+        <>
+          <section className="panel legend-strip" aria-label="Leyenda">
             <span className="leg xlsx-m">M# mañana</span>
             <span className="leg xlsx-t">T# tarde</span>
             <span className="leg xlsx-n">N# noche</span>
@@ -698,15 +1221,7 @@ export function CalendarPage() {
             <span className="leg xlsx-v">V vacaciones</span>
             <span className="leg xlsx-ef">EF enfermedad</span>
           </section>
-
           <section className="panel xlsx-wrap">
-            {inspectors.length === 0 ? (
-              <p className="muted" style={{ margin: '0.5rem 0.75rem' }}>
-                {allInspectors.length === 0
-                  ? `No hay días para ${dateFrom || '…'} → ${dateTo || '…'}. Proyectá el futuro en Proyección o ampliá el rango con “Todas (unir capas)”.`
-                  : 'Ningún inspector coincide con los filtros de inspector/móvil.'}
-              </p>
-            ) : null}
             <div className="xlsx-scroll">
               <table className="xlsx-grid">
                 <thead>
@@ -745,8 +1260,7 @@ export function CalendarPage() {
                         return (
                           <td
                             key={`${insp.key}-${d}`}
-                            className={cellClass(cell.codigo, cell.tipo_dia)}
-                            title={`${d} · ${cell.codigo}`}
+                            className={classicCellClass(cell.codigo, cell.tipo_dia)}
                           >
                             {cell.codigo}
                           </td>
@@ -758,110 +1272,14 @@ export function CalendarPage() {
               </table>
             </div>
           </section>
-
-          <section className="panel">
-            <h2 style={{ marginTop: 0, fontFamily: 'var(--font-display)' }}>
-              Cuadro de cobertura
-            </h2>
-            <p className="muted">
-              0 = hueco · 1 = cobertura normal · 2 = solapamiento / reforzada
-              {mobileNumber != null ? ` · filtrado móvil ${mobileNumber}` : ''}
-            </p>
-            <div className="xlsx-scroll">
-              <table className="xlsx-grid coverage-grid">
-                <thead>
-                  <tr className="month-row">
-                    <th className="sticky-col" />
-                    <th className="sticky-col-2" />
-                    {months.map((m) => (
-                      <th key={`cov-m-${m.key}`} colSpan={m.span} className="month-cell">
-                        {m.label}
-                      </th>
-                    ))}
-                  </tr>
-                  <tr>
-                    <th className="sticky-col">Móvil</th>
-                    <th className="sticky-col-2">Turno</th>
-                    {dates.map((d) => (
-                      <th key={`c-${d}`}>{d.slice(8)}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {coverageMobiles.flatMap((mobile) =>
-                    SHIFTS.map((shift, i) => (
-                      <tr key={`${mobile}-${shift}`}>
-                        {i === 0 ? (
-                          <td className="sticky-col" rowSpan={3}>
-                            {mobile}
-                          </td>
-                        ) : null}
-                        <td className="sticky-col-2">{SHIFT_LABEL[shift]}</td>
-                        {dates.map((d) => {
-                          const n = coverageMap.get(`${d}|${mobile}|${shift}`);
-                          const value = n ?? '';
-                          return (
-                            <td
-                              key={`${d}-${mobile}-${shift}`}
-                              className={typeof n === 'number' ? coverageClass(n) : undefined}
-                            >
-                              {value}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    )),
-                  )}
-                  {mobileNumber == null ? (
-                    <>
-                      <tr>
-                        <td className="sticky-col" colSpan={2}>
-                          Franco
-                        </td>
-                        {dates.map((d) => (
-                          <td key={`f-${d}`}>{totalsMap.get(d)?.francos ?? 0}</td>
-                        ))}
-                      </tr>
-                      <tr>
-                        <td className="sticky-col" colSpan={2}>
-                          Vacaciones
-                        </td>
-                        {dates.map((d) => {
-                          const n = totalsMap.get(d)?.vacaciones ?? 0;
-                          return (
-                            <td key={`v-${d}`} className={n > 0 ? 'xlsx-v' : undefined}>
-                              {n}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                      <tr>
-                        <td className="sticky-col" colSpan={2}>
-                          Enfermedad
-                        </td>
-                        {dates.map((d) => {
-                          const n = totalsMap.get(d)?.enfermedades ?? 0;
-                          return (
-                            <td key={`ef-${d}`} className={n > 0 ? 'xlsx-ef' : undefined}>
-                              {n}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    </>
-                  ) : null}
-                </tbody>
-              </table>
-            </div>
-          </section>
         </>
-      ) : (
+      ) : null}
+
+      {!board && !busy && versions.length ? (
         <section className="panel muted">
-          {versions.length === 0
-            ? 'No hay versiones. Confirme primero la inicialización Excel.'
-            : 'Indique un rango y pulse Consultar.'}
+          Indicá un rango válido o pulsá Actualizar.
         </section>
-      )}
+      ) : null}
     </div>
   );
 }

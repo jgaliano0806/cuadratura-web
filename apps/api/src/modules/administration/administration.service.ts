@@ -51,6 +51,8 @@ export class AdministrationService {
               CASE
                 WHEN p.codigo IS NULL THEN NULL
                 WHEN p.tipo = 'MOVIL4' THEN 'Móvil 4 · ' || p.codigo
+                WHEN p.tipo = 'MOVIL6' THEN 'Ruta 36 · Móvil 6 · ' || p.codigo
+                WHEN p.tipo = 'MOVIL7' THEN 'Ruta 36 · Móvil 7 · ' || p.codigo
                 ELSE 'Rotación · ' || p.codigo
               END AS posicion_etiqueta
        FROM seguridad_vial.inspector i

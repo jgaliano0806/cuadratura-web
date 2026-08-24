@@ -14,8 +14,18 @@ export type RoleCode = (typeof ROLE_CODES)[keyof typeof ROLE_CODES];
 
 export const SHIFT_SEQUENCE = ['M', 'N', 'T'] as const;
 export const MOBILE_SEQUENCE = [1, 5, 3, 2] as const;
+/** Móviles de cuadratura propia Ruta 36 (no rotan en la secuencia general). */
+export const RUTA36_MOBILES = [6, 7] as const;
 
 export const VACATION_DURATIONS = [7, 14, 21, 28, 35] as const;
+
+/**
+ * Tope de seguridad para consultas y proyecciones. La versión 2.7 no impone
+ * un límite operativo de planificación: este valor sólo evita que un rango
+ * accidentalmente enorme congele el navegador o la base. Ajustar si hiciera
+ * falta ampliar el horizonte.
+ */
+export const PLANNING_MAX_DAYS = 3660;
 
 export interface AuthUserDto {
   id: string;

@@ -51,10 +51,13 @@ export class ScheduleEngineService {
     const inputs = await this.loadProjectionInputs();
     if (!inputs.length) {
       throw new BadRequestException(
-        'No hay estados iniciales. Confirme la inicialización Excel primero.',
+        'No hay estados iniciales en estado_inicial_posicion. Ejecutá el seed operativo (scripts/seed-catalogos.mjs) antes de proyectar.',
       );
     }
 
+    // 2.7: la capa BASE ya no contiene datos históricos. Se usa la BASE seed
+    // (`BASE-SEED-2_7`) sólo como ancla para que las PLANIFICADAS satisfagan
+    // el trigger de integridad `PLANIFICADA debe derivar de BASE`.
     const base = await this.db.query<{ version_id: string }>(
       `SELECT v.id AS version_id
        FROM seguridad_vial.cronograma_version v
@@ -64,7 +67,9 @@ export class ScheduleEngineService {
        LIMIT 1`,
     );
     if (!base.rows[0]) {
-      throw new NotFoundException('No hay versión BASE publicada');
+      throw new NotFoundException(
+        'No hay BASE seed publicada. Aplicá la migración V023__base_seed_2_7.sql.',
+      );
     }
     const baseVersionId = base.rows[0].version_id;
 
@@ -728,6 +733,275 @@ export class ScheduleEngineService {
     };
   }
 
+  /**
+   * Enroque operativo entre dos inspectores (cualquier par).
+   * Inserta overlays día a día en asignacion_operativa (CAMBIO_TURNO) tomando
+   * destino del otro desde PLANIFICADA. No muta la cuadratura ideal.
+   */
+  async registerInspectorSwap(input: {
+    inspectorAId: string;
+    inspectorBId: string;
+    dateFrom: string;
+    dateTo: string;
+    userId: string;
+    reason?: string;
+    rematerialize?: boolean;
+  }) {
+    const {
+      inspectorAId,
+      inspectorBId,
+      dateFrom,
+      dateTo,
+      userId,
+      rematerialize = true,
+    } = input;
+    this.assertRange(dateFrom, dateTo);
+    if (inspectorAId === inspectorBId) {
+      throw new BadRequestException('Elegí dos inspectores distintos para el enroque');
+    }
+
+    const motivo =
+      (input.reason || '').trim() ||
+      `Enroque operativo ${dateFrom}→${dateTo}`;
+
+    const plan = await this.latestPlanVersionId(dateFrom, dateTo);
+    const days = await this.db.query<{
+      fecha: string;
+      inspector_id: string;
+      tipo_dia: string;
+      turno: string | null;
+      movil_id: string | null;
+      movil: number | null;
+      nombre: string;
+    }>(
+      `SELECT d.fecha_operativa::text AS fecha,
+              i.id AS inspector_id,
+              d.tipo_dia::text,
+              d.turno::text,
+              d.movil_id,
+              m.numero AS movil,
+              i.nombre_completo AS nombre
+       FROM seguridad_vial.dia_cronograma d
+       JOIN seguridad_vial.inspector i
+         ON i.id = coalesce(d.inspector_asignado_id, d.inspector_titular_id)
+       LEFT JOIN seguridad_vial.movil m ON m.id = d.movil_id
+       WHERE d.version_id = $1
+         AND i.id = ANY($2::uuid[])
+         AND d.fecha_operativa >= $3::date
+         AND d.fecha_operativa <= $4::date
+       ORDER BY d.fecha_operativa, i.nombre_completo`,
+      [plan, [inspectorAId, inspectorBId], dateFrom, dateTo],
+    );
+
+    if (!days.rows.length) {
+      throw new BadRequestException(
+        'No hay días en la cuadratura ideal para esos inspectores en el rango',
+      );
+    }
+
+    const byKey = new Map(
+      days.rows.map((r) => [`${r.inspector_id}|${r.fecha.slice(0, 10)}`, r]),
+    );
+    const nameA =
+      days.rows.find((r) => r.inspector_id === inspectorAId)?.nombre ?? 'A';
+    const nameB =
+      days.rows.find((r) => r.inspector_id === inspectorBId)?.nombre ?? 'B';
+
+    const dates = [
+      ...new Set(days.rows.map((r) => r.fecha.slice(0, 10))),
+    ].sort();
+
+    const overlays: Array<{
+      inspectorId: string;
+      date: string;
+      tipoDia: string;
+      turno: string | null;
+      movilId: string | null;
+    }> = [];
+
+    for (const fecha of dates) {
+      const a = byKey.get(`${inspectorAId}|${fecha}`);
+      const b = byKey.get(`${inspectorBId}|${fecha}`);
+      if (!a || !b) continue;
+
+      overlays.push({
+        inspectorId: inspectorAId,
+        date: fecha,
+        tipoDia: b.tipo_dia,
+        turno: b.tipo_dia === 'TRABAJO' ? b.turno : null,
+        movilId: b.tipo_dia === 'TRABAJO' ? b.movil_id : null,
+      });
+      overlays.push({
+        inspectorId: inspectorBId,
+        date: fecha,
+        tipoDia: a.tipo_dia,
+        turno: a.tipo_dia === 'TRABAJO' ? a.turno : null,
+        movilId: a.tipo_dia === 'TRABAJO' ? a.movil_id : null,
+      });
+    }
+
+    if (!overlays.length) {
+      throw new BadRequestException(
+        'No hay días compartidos entre ambos inspectores en el rango',
+      );
+    }
+
+    await this.db.query(
+      `UPDATE seguridad_vial.asignacion_operativa
+       SET estado = 'ANULADA'
+       WHERE tipo IN ('CAMBIO_TURNO', 'CAMBIO_MOVIL')
+         AND estado = 'ACTIVA'
+         AND inspector_id = ANY($1::uuid[])
+         AND fecha_desde <= $3::date
+         AND (fecha_hasta IS NULL OR fecha_hasta >= $2::date)`,
+      [[inspectorAId, inspectorBId], dateFrom, dateTo],
+    );
+
+    const ids: string[] = [];
+    for (const o of overlays) {
+      const ins = await this.db.query<{ id: string }>(
+        `INSERT INTO seguridad_vial.asignacion_operativa(
+           inspector_id, tipo, fecha_desde, fecha_hasta,
+           tipo_dia, turno, movil_id, motivo, creada_por
+         ) VALUES (
+           $1, 'CAMBIO_TURNO', $2::date, $2::date,
+           $3::seguridad_vial.tipo_dia,
+           $4::seguridad_vial.turno_codigo,
+           $5::uuid, $6, $7
+         ) RETURNING id`,
+        [
+          o.inspectorId,
+          o.date,
+          o.tipoDia,
+          o.turno,
+          o.movilId,
+          `${motivo} (${nameA} ⇄ ${nameB})`,
+          userId,
+        ],
+      );
+      ids.push(ins.rows[0].id);
+    }
+
+    let real: unknown = null;
+    if (rematerialize) {
+      real = await this.applyReal(dateFrom, dateTo, userId);
+    }
+
+    return {
+      registered: true,
+      date_from: dateFrom,
+      date_to: dateTo,
+      pair: [nameA, nameB],
+      days_swapped: dates.length,
+      asignacion_ids: ids,
+      plan_preserved: true,
+      real,
+    };
+  }
+
+  /**
+   * Ausencia operativa (vacación / licencia / feriado / enfermedad) como overlay.
+   * No altera PLANIFICADA; rematerializa REAL si se pide.
+   */
+  async registerOperationalAbsence(input: {
+    inspectorId: string;
+    dateFrom: string;
+    dateTo: string;
+    kind: 'VACACION' | 'LICENCIA' | 'FERIADO' | 'ENFERMEDAD';
+    userId: string;
+    reason?: string;
+    rematerialize?: boolean;
+  }) {
+    const {
+      inspectorId,
+      dateFrom,
+      dateTo,
+      kind,
+      userId,
+      rematerialize = true,
+    } = input;
+    this.assertRange(dateFrom, dateTo);
+
+    const tipoDia =
+      kind === 'FERIADO' ? 'FRANCO' : kind === 'VACACION' ? 'VACACION' : kind;
+    const motivo =
+      (input.reason || '').trim() ||
+      `${kind} operativa ${dateFrom}→${dateTo}`;
+
+    const exists = await this.db.query(
+      `SELECT 1 FROM seguridad_vial.inspector WHERE id = $1 AND estado = 'ACTIVO'`,
+      [inspectorId],
+    );
+    if (!exists.rows[0]) {
+      throw new NotFoundException('Inspector no encontrado o inactivo');
+    }
+
+    await this.db.query(
+      `UPDATE seguridad_vial.asignacion_operativa
+       SET estado = 'ANULADA'
+       WHERE tipo = 'LICENCIA'
+         AND estado = 'ACTIVA'
+         AND inspector_id = $1
+         AND fecha_desde <= $3::date
+         AND (fecha_hasta IS NULL OR fecha_hasta >= $2::date)`,
+      [inspectorId, dateFrom, dateTo],
+    );
+
+    const ins = await this.db.query<{ id: string }>(
+      `INSERT INTO seguridad_vial.asignacion_operativa(
+         inspector_id, tipo, fecha_desde, fecha_hasta,
+         tipo_dia, motivo, creada_por
+       ) VALUES (
+         $1, 'LICENCIA', $2::date, $3::date,
+         $4::seguridad_vial.tipo_dia, $5, $6
+       ) RETURNING id`,
+      [inspectorId, dateFrom, dateTo, tipoDia, motivo, userId],
+    );
+
+    let real: unknown = null;
+    if (rematerialize) {
+      real = await this.applyReal(dateFrom, dateTo, userId);
+    }
+
+    return {
+      registered: true,
+      kind,
+      tipo_dia: tipoDia,
+      date_from: dateFrom,
+      date_to: dateTo,
+      asignacion_id: ins.rows[0].id,
+      plan_preserved: true,
+      real,
+    };
+  }
+
+  private async latestPlanVersionId(dateFrom: string, dateTo: string) {
+    const plan = await this.db.query<{ version_id: string }>(
+      `SELECT v.id AS version_id
+       FROM seguridad_vial.cronograma_version v
+       JOIN seguridad_vial.cronograma c ON c.id = v.cronograma_id
+       WHERE c.capa = 'PLANIFICADA'
+         AND c.periodo_desde <= $2::date
+         AND c.periodo_hasta >= $1::date
+       ORDER BY
+         CASE v.estado
+           WHEN 'APROBADA_PUBLICADA' THEN 0
+           WHEN 'EN_REVISION' THEN 1
+           WHEN 'OBSERVADA' THEN 2
+           ELSE 3
+         END,
+         v.creada_en DESC
+       LIMIT 1`,
+      [dateFrom, dateTo],
+    );
+    if (!plan.rows[0]) {
+      throw new NotFoundException(
+        'No hay PLANIFICADA que cubra el rango para tomar la cuadratura ideal',
+      );
+    }
+    return plan.rows[0].version_id;
+  }
+
   private assertRange(dateFrom: string, dateTo: string) {
     if (!dateFrom || !dateTo || dateFrom > dateTo) {
       throw new BadRequestException('Rango de fechas inválido');
@@ -735,8 +1009,13 @@ export class ScheduleEngineService {
     const from = Date.parse(dateFrom + 'T12:00:00Z');
     const to = Date.parse(dateTo + 'T12:00:00Z');
     const days = Math.round((to - from) / 86_400_000) + 1;
-    if (days > 370) {
-      throw new BadRequestException('El rango máximo de proyección es 370 días');
+    // Sin límite operativo de planificación (v2.7). Tope de seguridad ~10 años
+    // para evitar consumo desmedido en caso de valores accidentales.
+    const HARD_CAP = 3660;
+    if (days > HARD_CAP) {
+      throw new BadRequestException(
+        `El rango solicitado (${days} días) supera el tope de seguridad de ${HARD_CAP} días`,
+      );
     }
   }
 
@@ -752,6 +1031,7 @@ export class ScheduleEngineService {
       movil: number | null;
       indice_turno: number | null;
       indice_movil: number | null;
+      bloques_completados_movil: number | null;
       turnos: string[];
       moviles: number[];
     }>(
@@ -790,6 +1070,7 @@ export class ScheduleEngineService {
               m.numero AS movil,
               e.indice_turno,
               e.indice_movil,
+              e.bloques_completados_movil,
               pf.turnos,
               pf.moviles
        FROM seguridad_vial.estado_inicial_posicion e
@@ -848,11 +1129,11 @@ export class ScheduleEngineService {
       if (shiftIndex < 0) shiftIndex = 0;
       if (mobileIndex < 0) mobileIndex = 0;
 
-      const completed = countCompletedSameMobileBlocks(
-        posBlocks,
-        ref,
-        mobile,
-      );
+      // Preferir el valor persistido en estado_inicial_posicion (regla actual
+      // sin BASE). Fallback: contar bloques históricos si existen.
+      const completed =
+        row.bloques_completados_movil ??
+        countCompletedSameMobileBlocks(posBlocks, ref, mobile);
 
       return {
         positionCode: row.posicion_codigo,

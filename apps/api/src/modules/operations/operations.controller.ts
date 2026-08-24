@@ -12,6 +12,11 @@ export class OperationsController {
     return this.operations.mobile4Positions();
   }
 
+  @Get('ruta36/positions')
+  ruta36() {
+    return this.operations.ruta36Positions();
+  }
+
   @Get('inspectors')
   inspectors() {
     return this.operations.listInspectors();

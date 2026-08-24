@@ -1,6 +1,6 @@
 # Configuraciones Operativas
 
-**Versión:** 2.6
+**Versión:** 2.7
 
 ## 1. Objetivo
 
@@ -31,7 +31,9 @@ ciclo_laboral:
   franco: 3
 turnos: [M, N, T]
 moviles: [1, 5, 3, 2]
-cambio_movil: inicio_de_bloque
+rotacion: 1 -> 5 -> 3 -> 2 -> 1
+bloques_por_movil: 4
+cambio_movil: inicio_de_bloque_y_al_completar_bloques_por_movil
 continuidad_mensual: true
 ```
 
@@ -119,17 +121,19 @@ Esto permite que dos inspectores:
 - Confirmar la configuración histórica de cada inspector.
 
 
-## 11. Origen inicial de las configuraciones
+## 11. Origen inicial de las configuraciones (2.7)
 
-Durante la puesta en marcha, las configuraciones y posiciones pueden inferirse y cargarse desde la hoja `Móviles CBA 26-27`.
+Durante la puesta en marcha, las configuraciones y posiciones se cargan mediante el **seed operativo directo** del sistema (RN-026), sin importación de Excel.
 
 Esta carga:
 
-- ocurre una sola vez;
-- debe ser revisada antes de confirmarse;
-- crea las vigencias iniciales;
-- no habilita actualizaciones posteriores desde Excel;
-- no reemplaza la administración normal de configuraciones después de la puesta en marcha.
+- se ejecuta con el script `scripts/seed-catalogos.mjs`;
+- toma como corte el 01/06/2026;
+- es idempotente (limpia y reinserta los estados operativos antes de cargar);
+- crea las vigencias iniciales de asignaciones y estados de posición;
+- persiste `bloques_completados_movil` para respetar la rotación 1 → 5 → 3 → 2 → 1 con 4 bloques por móvil;
+- no habilita ninguna importación externa después de la puesta en marcha;
+- toda modificación posterior se realiza por administración operativa auditada.
 
 ## 12. Configuración de vacaciones
 
@@ -171,6 +175,37 @@ movil_4:
     - { codigo: M4-P05, ancla: 2026-05-07, codigo_inicial: T4, desfase_dias: 6 }
 ```
 
+## 13.bis Catálogo inicial Ruta 36 (móviles 6 y 7)
+
+```yaml
+ruta_36:
+  base: Ruta 36
+  referencia: 2026-06-01
+  ciclo: { trabajo: 5, franco: 3 }
+  turnos: [M, N, T]
+  capacidad_maxima_por_turno: 2
+  cobertura_objetivo: 1
+  dupla_vinculada: false
+  movil_6:
+    sitio: Piedras Moras
+    horarios: { M: "06:00", T: "14:00", N: "22:00" }
+    posiciones:
+      - { codigo: M6-P01, ocupante: "López J.", ancla: 2026-06-01, codigo_inicial: M6 }
+      - { codigo: M6-P02, ocupante: Scagnetti, ancla: 2026-06-01, codigo_inicial: T6 }
+      - { codigo: M6-P03, ocupante: Cingolani, ancla: 2026-06-01, codigo_inicial: N6 }
+      - { codigo: M6-P04, ocupante: Fanloo, ancla: 2026-06-03, codigo_inicial: M6, desfase_dias: 2 }
+      - { codigo: M6-P05, ocupante: Torres, ancla: 2026-06-03, codigo_inicial: T6, desfase_dias: 2 }
+  movil_7:
+    sitio: Arroyo Tegua
+    horarios: { M: "07:00", T: "15:00", N: "23:00" }
+    posiciones:
+      - { codigo: M7-P01, ocupante: Falco, ancla: 2026-06-01, codigo_inicial: M7 }
+      - { codigo: M7-P02, ocupante: "Fernández L.", ancla: 2026-06-01, codigo_inicial: T7 }
+      - { codigo: M7-P03, ocupante: Zeballe, ancla: 2026-06-01, codigo_inicial: N7 }
+      - { codigo: M7-P04, ocupante: Coria, ancla: 2026-06-03, codigo_inicial: M7, desfase_dias: 2 }
+      - { codigo: M7-P05, ocupante: Coronel, ancla: 2026-06-03, codigo_inicial: T7, desfase_dias: 2 }
+```
+
 ## 14. Cobertura y aprobación
 
 ```yaml
@@ -190,21 +225,39 @@ flujo:
   version_publicada_inmutable: true
 ```
 
-## 15. Configuración ejecutable 2.6
+## 15. Configuración ejecutable 2.7
 
 ```yaml
 turnos:
   duracion_minutos: 480
   fecha_operativa: inicio
-inicializador:
-  hoja_exacta: "Móviles Cba 26-27"
-  rango_esperado: "A1:OP56"
-  celdas_combinadas: "forward-fill solo encabezados"
-  reversion: "solo antes de capas derivadas o eventos reales"
+seed_operativo:
+  script: scripts/seed-catalogos.mjs
+  corte: 2026-06-01
+  idempotente: true
+  wipe_previo:
+    - asignacion_inspector_posicion
+    - estado_inicial_posicion
+    - miembro_grupo_rotacion_vinculada
+    - grupo_rotacion_vinculada
+    - posicion_cuadratura
+    - grupo_franco
+    - inspector
+motor:
+  rotacion_general: [1, 5, 3, 2]
+  bloques_por_movil: 4
+  perfiles_fijos: [FIJO_MOVIL, MOVIL6_FIJO, MOVIL7_FIJO]
+  fuente_estado_inicial: estado_inicial_posicion
+  campo_persistido: bloques_completados_movil
 trabajo_demanda:
   prioridad_turnos: [T, N, M]
   requiere_hueco: true
 movil4:
   posicion_externa_vinculada: M4-P03-EXT
   grupo_vinculado: GRV-M4-P03
+ruta36:
+  base: RUTA36
+  moviles: [6, 7]
+  perfiles: [MOVIL6_FIJO, MOVIL7_FIJO]
+  posiciones_por_movil: 5
 ```

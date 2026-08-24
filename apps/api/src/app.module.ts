@@ -3,7 +3,6 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { DatabaseModule } from './database/database.module';
 import { IdentityModule } from './modules/identity/identity.module';
-import { InitializationModule } from './modules/bootstrap-initialization/initialization.module';
 import { CoverageModule } from './modules/coverage/coverage.module';
 import { OperationsModule } from './modules/operations/operations.module';
 import { PlanningModule } from './modules/planning/planning.module';
@@ -25,7 +24,6 @@ import { HealthController } from './health.controller';
     }),
     DatabaseModule,
     IdentityModule,
-    InitializationModule,
     CoverageModule,
     OperationsModule,
     PlanningModule,

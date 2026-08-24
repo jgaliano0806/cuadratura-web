@@ -1,7 +1,7 @@
 # Documentación Funcional Maestra — Plataforma de Inspectores y Móviles
 
-**Versión:** 2.6  
-**Estado:** Base funcional consolidada; existen decisiones pendientes identificadas.  
+**Versión:** 2.7  
+**Estado:** Base funcional consolidada; sistema en operación con seed directo (sin importación de Excel).  
 **Fuente de verdad documental:** `01_Catalogo_Maestro_Reglas_de_Negocio_v2_6.md`
 
 ## 1. Objetivo
@@ -13,8 +13,9 @@ Definir de forma trazable la solución para:
 - Registrar lo planificado y lo ocurrido realmente.
 - Gestionar vacaciones, ausencias, licencias y reemplazos opcionales.
 - Mantener auditoría de cambios.
-- Inicializar una única vez la cuadratura base utilizando la hoja `Móviles CBA 26-27` del Excel aprobado.
 - Producir reportes de cobertura y comparación planificado versus real.
+
+> Desde la versión 2.7 el sistema **no requiere importación de Excel**. El estado inicial se carga como seed operativo directo con corte al 01/06/2026 y el motor toma desde allí toda la proyección futura.
 
 ## 2. Principio de documentación
 
@@ -78,6 +79,8 @@ El ciclo laboral es **5×3 y continuo**:
 
 `1 → 5 → 3 → 2 → 1`
 
+La rotación avanza sólo cuando se completan **4 bloques de trabajo** en el móvil actual. El contador `bloques_completados_movil` se persiste en `estado_inicial_posicion` (RN-034).
+
 7. El móvil puede cambiar únicamente cuando empieza un nuevo bloque de cinco días.
 8. El móvil 4 posee una cuadratura operativa propia compuesta por cinco posiciones continuas y desfasadas bajo régimen 5×3.
 9. Las posiciones del móvil 4 mantienen siempre el móvil 4 y rotan los turnos en la secuencia `M → N → T`.
@@ -85,6 +88,7 @@ El ciclo laboral es **5×3 y continuo**:
 11. Los inspectores pueden cambiar dentro de una posición sin reiniciar ni alterar la continuidad de la cuadratura.
 12. Haro y Ramos integran una dupla operativa vinculada: comparten turnos, bloques y francos, mientras alternan entre el móvil 4 y el móvil externo correspondiente a la secuencia general.
 13. Las configuraciones especiales se modelan mediante datos y vigencias; no se programan por nombre de inspector.
+14. La Ruta 36 opera con cuadraturas propias de los móviles 6 (Piedras Moras) y 7 (Arroyo Tegua), cada una con cinco posiciones 5×3 fijas en su móvil, base Ruta 36 y sin dupla vinculada inicial.
 
 ## 5. Documentos del paquete
 
@@ -127,6 +131,8 @@ Esta versión:
 | 2.3 | Cierre funcional de vacaciones: días corridos, francos previos, trabajo a demanda y retorno a la cuadratura. |
 | 2.4 | Estado inicial desde el Excel histórico, cobertura mínima, aprobación/publicación y anclas verificadas del móvil 4. |
 | 2.5 | Modelo físico PostgreSQL, materialización de BASE/PLANIFICADA/REAL, migraciones y restricciones. |
+| 2.6 | Turnos de 8 horas, parser exacto de Excel, tablero de huecos, dupla vinculada del móvil 4 e integración web. |
+| 2.7 | Eliminación de la inicialización por Excel, incorporación de Ruta 36 (móviles 6 y 7), seed operativo directo al 01/06/2026 y persistencia explícita de bloques completados por móvil. |
 
 ## 8. Regla consolidada de vacaciones
 
@@ -209,3 +215,12 @@ Se incorpora un esquema PostgreSQL ejecutable con migraciones, índices, restric
 4. Tablero de huecos con filtros y estado de justificación.
 5. Propuesta y asignación de trabajos a demanda de vacaciones según necesidad operativa.
 6. Migración PostgreSQL `V011__excel_initializer_and_operational_functions.sql` y aplicación Python ejecutable.
+
+## 12. Implementaciones cerradas en la versión 2.7
+
+1. **Ruta 36 operativa** con dos cuadraturas propias (móvil 6 Piedras Moras y móvil 7 Arroyo Tegua), 5×3, 5 posiciones por móvil, sin rotación externa, base `RUTA36`. Perfiles `MOVIL6_FIJO` y `MOVIL7_FIJO`, tipos `MOVIL6` y `MOVIL7`, vista `v_ruta36_posiciones_vigentes`, endpoint `/operations/ruta36/positions` y página web `/ruta36` (migraciones `V019` y `V020`).
+2. **Retiro del flujo Excel.** Se eliminan el módulo `bootstrap-initialization` de la API, la página `InitializationPage`, las rutas `/initialization/*`, el link del sidebar y los accesos desde `Home` y `Administración`. Toda planificación pasa por el motor y por administración operativa.
+3. **Wipe operativo y seed directo.** La migración `V021__wipe_and_no_excel.sql` limpia las tablas operativas heredadas y el script `scripts/seed-catalogos.mjs` carga catálogos, 37 inspectores, sus 37 posiciones y los estados iniciales al 01/06/2026 de forma idempotente.
+4. **Regla `1 → 5 → 3 → 2 → 1` con 4 bloques por móvil.** El motor rota únicamente al comenzar un nuevo bloque de trabajo y sólo cuando ya se completaron 4 bloques en el móvil actual. Los móviles 4, 6 y 7 no rotan.
+5. **Bloques completados persistidos.** Migración `V022` que agrega `estado_inicial_posicion.bloques_completados_movil` (0..4) y actualización del cargador de proyección en `schedule-engine.service.ts` para tomar ese valor como fuente primaria, con fallback al conteo por bloques históricos.
+6. **Verificación end-to-end.** Los 37 inspectores proyectados coinciden con la cuadratura provista en sus primeros ~30 días (script `scripts/verify-projection.mjs`) y los tests unitarios del motor `projection.spec.ts` cubren los perfiles GENERAL, MOVIL4, MOVIL6 y MOVIL7.

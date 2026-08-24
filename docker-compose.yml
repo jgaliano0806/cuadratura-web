@@ -6,7 +6,8 @@ services:
       POSTGRES_USER: seguridad_vial
       POSTGRES_PASSWORD: seguridad_vial_local
     ports:
-      - "55433:5432"
+      # 55433 cae en rangos excluidos de Hyper-V en Windows; 5434 queda libre.
+      - "5434:5432"
     volumes:
       - seguridad_vial_pgdata:/var/lib/postgresql/data
     healthcheck:

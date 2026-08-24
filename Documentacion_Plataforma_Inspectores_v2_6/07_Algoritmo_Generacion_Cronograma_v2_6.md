@@ -1,21 +1,22 @@
 # Algoritmo Oficial de Generación de Cronograma
 
-**Versión:** 2.6  
-**Estado:** Regla general confirmada. Anclas del móvil 4 verificadas contra el Excel histórico.
+**Versión:** 2.7  
+**Estado:** Regla general confirmada, con `1 → 5 → 3 → 2 → 1` y 4 bloques por móvil. Anclas del móvil 4 verificadas al 01/05/2026 y anclas de Ruta 36 verificadas al 01/06/2026. La versión 2.7 opera sin capa BASE ni Excel: el motor recibe todo el estado necesario desde `estado_inicial_posicion`.
 
 ## 1. Entradas
 
 - Fecha desde y fecha hasta.
 - Inspector.
-- Estado inicial:
+- Estado inicial (persistido en `estado_inicial_posicion`):
   - fecha de referencia;
-  - posición dentro del bloque 5×3;
-  - turno vigente;
-  - móvil vigente;
-  - posición de la rotación de turnos;
-  - posición de la rotación de móviles.
+  - posición dentro del bloque 5×3 (0..7);
+  - turno vigente (M/N/T o nulo en franco);
+  - móvil vigente (o nulo en franco);
+  - índice de la rotación de turnos;
+  - índice de la rotación de móviles;
+  - **bloques completados en el móvil actual** (0..4, RN-034).
 - Grupo de francos.
-- Configuración operativa vigente.
+- Perfil de rotación vigente (`ROTACION_GENERAL`, `FIJO_MOVIL`, `MOVIL6_FIJO`, `MOVIL7_FIJO`).
 - Horarios por móvil.
 - Estado de móviles.
 
@@ -31,16 +32,17 @@ La secuencia es circular; no existe un “enero inicial” obligatorio. Cada ins
 
 ## 3. Reglas de cálculo
 
-1. Partir del estado inicial válido.
+1. Partir del estado inicial válido (`estado_inicial_posicion`).
 2. Completar el bloque en curso, si lo hubiera.
 3. Generar cinco días con el mismo turno y móvil.
 4. Generar tres francos.
-5. Avanzar una posición en la secuencia de turnos.
-6. Evaluar el móvil objetivo al comienzo del nuevo bloque.
-7. Si el bloque anterior cruzó de mes, no modificarlo.
-8. Aplicar el cambio de móvil solamente en el nuevo bloque.
-9. Repetir hasta cubrir el período solicitado.
-10. Aplicar luego las capas de planificación conocida y operación real según el modelo definitivo.
+5. Al cerrar el bloque de trabajo (transición día 4 → día 5 del ciclo), incrementar `bloques_completados_movil`.
+6. Avanzar una posición en la secuencia de turnos al iniciar el próximo bloque (transición día 7 → día 0).
+7. Evaluar el móvil objetivo al comienzo del nuevo bloque: si el perfil es fijo (`FIJO_MOVIL`, `MOVIL6_FIJO`, `MOVIL7_FIJO`) el móvil no cambia; si el perfil es `ROTACION_GENERAL`, cambiar de móvil sólo cuando `bloques_completados_movil ≥ 4` y reiniciar el contador a 0.
+8. Si el bloque anterior cruzó de mes, no modificarlo.
+9. Aplicar el cambio de móvil solamente en el nuevo bloque.
+10. Repetir hasta cubrir el período solicitado.
+11. Aplicar luego las capas de planificación conocida y operación real según el modelo definitivo.
 
 ## 4. Pseudocódigo
 
@@ -111,6 +113,18 @@ El cambio de móvil 2 a móvil 1 se produce al iniciar el bloque del 3 de octubr
 5. Cambiar al ocupante no reinicia la posición.
 6. La combinación mantiene cobertura M/T/N con solapamientos máximos de dos.
 
+## 7.bis Algoritmo específico de Ruta 36 (móviles 6 y 7)
+
+Misma lógica que el móvil 4, aplicada por separado a cada móvil:
+
+1. Perfil fijo `MOVIL6_FIJO` o `MOVIL7_FIJO` (secuencia de un solo móvil).
+2. Ciclo 5×3 continuo y turnos `M → N → T`.
+3. Cinco posiciones desfasadas por móvil aseguran cobertura diaria M/T/N con dos francos.
+4. Capacidad máxima 2; objetivo 1; huecos con alerta (RN-016).
+5. Base operativa Ruta 36. Horarios: M6 06/14/22; M7 07/15/23.
+6. Referencia de anclas: cronograma junio 2026 (estado al 01/06/2026).
+7. Sin dupla vinculada en la configuración inicial.
+
 ## 8. Algoritmo de dupla operativa vinculada
 
 Configuración inicial: Haro–Ramos G.
@@ -135,7 +149,7 @@ La excepción debe ser un dato; no una condición escrita con el nombre del insp
 
 ## 10. Validaciones
 
-- El Excel debe permitir reconstruir un estado inicial consistente.
+- El estado inicial (`estado_inicial_posicion`) debe existir para cada posición activa y ser internamente consistente.
 - Cero personas genera alerta.
 - Una persona representa cobertura normal.
 - Dos personas representan cobertura reforzada.
@@ -145,25 +159,23 @@ La excepción debe ser un dato; no una condición escrita con el nombre del insp
 - No cortar bloques por cambio de mes.
 - No reiniciar una posición del móvil 4 al cambiar de ocupante.
 - No desincronizar la dupla Haro–Ramos G.
+- Para perfiles con rotación general, `bloques_completados_movil` no puede quedar fuera de `[0, 4]`.
 
-## 11. Inicialización del estado del motor
+## 11. Inicialización del estado del motor (2.7)
 
-La hoja `Móviles CBA 26-27` se utiliza una única vez para obtener:
+Desde la versión 2.7 la inicialización se realiza como **seed operativo directo** (RN-026). El script `scripts/seed-catalogos.mjs`:
 
-- bloques históricos;
-- grupos de franco;
-- posiciones de cuadratura;
-- estados iniciales de inspectores y posiciones;
-- configuraciones generales y especiales observables;
-- datos esperados del Golden Master.
+1. Ejecuta un wipe controlado de asignaciones, estados iniciales y posiciones previas.
+2. Garantiza los catálogos base (bases operativas, móviles 1..7, horarios, perfiles, grupos de franco).
+3. Inserta los 37 inspectores, sus posiciones (22 GENERAL, 5 MOVIL4, 5 MOVIL6, 5 MOVIL7) y las asignaciones vigentes desde el 01/06/2026.
+4. Carga el `estado_inicial_posicion` de cada posición con el corte al 01/06/2026, incluyendo `posicion_ciclo`, `turno`, `movil_id`, `indice_turno`, `indice_movil` y `bloques_completados_movil` (RN-034).
 
-Después de confirmar la inicialización:
+Después del seed:
 
-1. El Excel deja de ser fuente operativa.
-2. El motor de reglas genera toda cuadratura futura.
-3. Las novedades se registran sobre planificado/real, no mediante nuevas importaciones.
-4. El Golden Master permanece como referencia de regresión.
-5. El último estado histórico válido se transforma en estado inicial oficial.
+1. El Excel ya no es fuente operativa. El módulo `bootstrap-initialization`, la página web `Inicialización` y las rutas `/initialization` fueron retiradas del sistema.
+2. El motor de reglas genera toda cuadratura futura desde el corte del 01/06/2026.
+3. Las novedades se registran sobre planificado/real, no mediante importaciones.
+4. Toda modificación de estado inicial se hace por administración operativa y queda auditada.
 
 ## 12. Algoritmo de vacaciones
 
@@ -195,17 +207,15 @@ Proceso:
 6. Reincorporar al inspector a la cuadratura planificada correspondiente a la fecha siguiente.
 7. Mantener la cuadratura base intacta.
 
-## 13. Algoritmo ejecutable del inicializador
+## 13. Algoritmo ejecutable del seed (2.7)
 
-1. Seleccionar únicamente la hoja cuya clave normalizada sea `moviles cba 26 27`.
-2. Localizar la fila `INSPECTOR DE MÓVIL`.
-3. Leer fechas desde la columna C y exigir continuidad diaria.
-4. Expandir encabezados mensuales combinados por *forward-fill*.
-5. Leer inspectores numerados de forma contigua; detenerse antes de la matriz de cobertura.
-6. Normalizar nombres y códigos; nunca rellenar celdas operativas vacías.
-7. Clasificar trabajo, franco, vacaciones y enfermedad.
-8. Inferir desfase 5×3 ignorando novedades.
-9. Reconstruir bloques de trabajo/franco y marcar parciales.
-10. Detectar posiciones del móvil 4 y duplas complementarias.
-11. Guardar preview/staging; confirmar solamente sin errores.
-12. Materializar BASE y Golden Master en una transacción.
+Reemplaza al algoritmo del inicializador Excel de la versión 2.6.
+
+1. Abrir transacción y desactivar temporalmente triggers de replicación (`session_replication_role = 'replica'`).
+2. Truncar tablas operativas dependientes: `asignacion_inspector_posicion`, `estado_inicial_posicion`, `miembro_grupo_rotacion_vinculada`, `grupo_rotacion_vinculada`, `posicion_cuadratura`, `grupo_franco`, `inspector`.
+3. Asegurar catálogos base: bases operativas (`OBRADOR`, `RUTA53`, `RUTA36`), móviles 1..7, horarios `horario_turno_movil`, perfiles (`ROTACION_GENERAL`, `FIJO_MOVIL`, `MOVIL6_FIJO`, `MOVIL7_FIJO`) con sus turnos y móviles.
+4. Insertar los 37 inspectores del corte 01/06/2026 con su grupo de franco y perfil.
+5. Insertar las 37 posiciones (22 GENERAL, 5 MOVIL4, 5 MOVIL6, 5 MOVIL7) con su perfil y base.
+6. Insertar las asignaciones vigentes `asignacion_inspector_posicion` con `vigencia = [2026-06-01, infinity)`.
+7. Insertar los estados iniciales en `estado_inicial_posicion` con `fecha_referencia = 2026-06-01` y `bloques_completados_movil` calculado por el planificador de anclas.
+8. Confirmar transacción; verificar consistencia con `scripts/verify-projection.mjs` y con `projection.spec.ts`.

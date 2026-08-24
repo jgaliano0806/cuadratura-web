@@ -6,7 +6,13 @@
  */
 
 export type ShiftCode = 'M' | 'N' | 'T';
-export type DayType = 'TRABAJO' | 'FRANCO';
+export type DayType =
+  | 'TRABAJO'
+  | 'FRANCO'
+  | 'VACACION'
+  | 'LICENCIA'
+  | 'ENFERMEDAD'
+  | 'HUECO';
 
 export type ProjectionInput = {
   positionCode: string;
@@ -81,6 +87,10 @@ export function diffDaysIso(a: string, b: string): number {
 
 function codeFor(dayType: DayType, shift: ShiftCode | null, mobile: number | null): string {
   if (dayType === 'FRANCO') return 'F';
+  if (dayType === 'VACACION') return 'V';
+  if (dayType === 'ENFERMEDAD') return 'EF';
+  if (dayType === 'LICENCIA') return 'L';
+  if (dayType === 'HUECO') return 'H';
   if (!shift || mobile === null) return 'F';
   return `${shift}${mobile}`;
 }

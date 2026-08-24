@@ -1,6 +1,14 @@
 import { Body, Controller, Post, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
-import { IsDateString, IsOptional, IsString, MinLength } from 'class-validator';
+import {
+  IsBoolean,
+  IsDateString,
+  IsIn,
+  IsOptional,
+  IsString,
+  IsUUID,
+  MinLength,
+} from 'class-validator';
 import { ROLE_CODES } from '@plataforma/shared';
 import { CurrentUser, RequestUser } from '../identity/current-user.decorator';
 import { Roles, RolesGuard } from '../identity/roles.guard';
@@ -30,6 +38,50 @@ class PairSwapDto {
   @IsOptional()
   @IsString()
   reason?: string;
+}
+
+class InspectorSwapDto {
+  @IsUUID()
+  inspector_a_id!: string;
+
+  @IsUUID()
+  inspector_b_id!: string;
+
+  @IsDateString()
+  date_from!: string;
+
+  @IsDateString()
+  date_to!: string;
+
+  @IsOptional()
+  @IsString()
+  reason?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  rematerialize?: boolean;
+}
+
+class AbsenceDto {
+  @IsUUID()
+  inspector_id!: string;
+
+  @IsDateString()
+  date_from!: string;
+
+  @IsDateString()
+  date_to!: string;
+
+  @IsIn(['VACACION', 'LICENCIA', 'FERIADO', 'ENFERMEDAD'])
+  kind!: 'VACACION' | 'LICENCIA' | 'FERIADO' | 'ENFERMEDAD';
+
+  @IsOptional()
+  @IsString()
+  reason?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  rematerialize?: boolean;
 }
 
 @Controller('schedule-engine')
@@ -73,5 +125,38 @@ export class ScheduleEngineController {
       user.userId,
       body.reason,
     );
+  }
+
+  /** Enroque entre dos inspectores cualquiera (overlays; no toca PLAN). */
+  @Post('swap')
+  @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE)
+  inspectorSwap(
+    @Body() body: InspectorSwapDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    return this.engine.registerInspectorSwap({
+      inspectorAId: body.inspector_a_id,
+      inspectorBId: body.inspector_b_id,
+      dateFrom: body.date_from,
+      dateTo: body.date_to,
+      userId: user.userId,
+      reason: body.reason,
+      rematerialize: body.rematerialize ?? true,
+    });
+  }
+
+  /** Vacación / licencia / feriado / enfermedad operativa (overlay REAL). */
+  @Post('absence')
+  @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE)
+  absence(@Body() body: AbsenceDto, @CurrentUser() user: RequestUser) {
+    return this.engine.registerOperationalAbsence({
+      inspectorId: body.inspector_id,
+      dateFrom: body.date_from,
+      dateTo: body.date_to,
+      kind: body.kind,
+      userId: user.userId,
+      reason: body.reason,
+      rematerialize: body.rematerialize ?? true,
+    });
   }
 }

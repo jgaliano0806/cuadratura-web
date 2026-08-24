@@ -1,10 +1,13 @@
 import { FormEvent, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { PLANNING_MAX_DAYS } from '@plataforma/shared';
 import { api, ApiError } from '../lib/api';
+import { firstIssueFor, validateDateRange } from '../lib/dateRange';
 import {
-  firstIssueFor,
-  validateDateRange,
-} from '../lib/dateRange';
+  ConfirmDialog,
+  DateRangePresets,
+  useToast,
+} from '../components/ui';
 
 type Preview = {
   date_from: string;
@@ -50,18 +53,24 @@ type SwapResult = {
   next: string;
 };
 
-const PROJECTION_MAX_DAYS = 370;
+const PROJECTION_MAX_DAYS = PLANNING_MAX_DAYS;
+
+type Step = 1 | 2 | 3 | 4;
 
 export function ProjectionPage() {
+  const toast = useToast();
   const [dateFrom, setDateFrom] = useState('2026-08-01');
   const [dateTo, setDateTo] = useState('2026-08-31');
   const [preview, setPreview] = useState<Preview | null>(null);
   const [applied, setApplied] = useState<ApplyResult | null>(null);
   const [wipeInfo, setWipeInfo] = useState<WipeResult | null>(null);
   const [swapInfo, setSwapInfo] = useState<SwapResult | null>(null);
-  const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [touched, setTouched] = useState({ from: false, to: false });
+  const [confirmWipe, setConfirmWipe] = useState(false);
+  const [confirmApply, setConfirmApply] = useState(false);
+  const [confirmSwap, setConfirmSwap] = useState(false);
+  const [confirmReal, setConfirmReal] = useState(false);
 
   const dateIssues = useMemo(
     () =>
@@ -79,95 +88,92 @@ export function ProjectionPage() {
     touched.from || touched.to ? firstIssueFor(dateIssues, 'range') : '';
   const datesValid = dateIssues.length === 0;
 
+  const currentStep: Step = useMemo(() => {
+    if (applied) return 4;
+    if (preview) return 2;
+    return 1;
+  }, [preview, applied]);
+
   async function runPreview(e?: FormEvent) {
     e?.preventDefault();
     setTouched({ from: true, to: true });
     if (dateIssues.length) {
-      setError(dateIssues[0].message);
+      toast.warning(dateIssues[0].message, 'Rango inválido');
       setPreview(null);
       return;
     }
     setBusy(true);
-    setError('');
     setApplied(null);
     try {
       const data = await api<Preview>('/schedule-engine/preview', {
         method: 'POST',
         body: JSON.stringify({ date_from: dateFrom, date_to: dateTo }),
-        headers: { 'Content-Type': 'application/json' },
       });
       setPreview(data);
+      toast.success(
+        `${data.positions} posiciones · ${data.days_generated} días proyectados`,
+        'Vista previa OK',
+      );
     } catch (err) {
       setPreview(null);
-      setError(err instanceof ApiError ? err.message : 'Error en preview');
+      toast.error(err instanceof ApiError ? err.message : 'Error en preview');
     } finally {
       setBusy(false);
     }
   }
 
   async function runApply() {
-    setTouched({ from: true, to: true });
-    if (dateIssues.length) {
-      setError(dateIssues[0].message);
-      return;
-    }
+    setConfirmApply(false);
     setBusy(true);
-    setError('');
     try {
       const data = await api<ApplyResult>('/schedule-engine/apply', {
         method: 'POST',
         body: JSON.stringify({ date_from: dateFrom, date_to: dateTo }),
-        headers: { 'Content-Type': 'application/json' },
       });
       setApplied(data);
       setWipeInfo(null);
+      toast.success(
+        `Versión ${data.codigo} v${data.numero_version} generada.`,
+        'PLANIFICADA creada',
+      );
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Error al aplicar');
+      toast.error(err instanceof ApiError ? err.message : 'Error al aplicar');
     } finally {
       setBusy(false);
     }
   }
 
-  async function runWipe() {
-    const reason = window.prompt(
-      'Motivo de tabula rasa PLANIFICADA (mín. 5 caracteres):',
-      'Regeneración limpia sin overlays operativos',
-    );
-    if (!reason || reason.trim().length < 5) return;
-    if (
-      !window.confirm(
-        'Se eliminarán TODOS los cronogramas PLANIFICADA. La BASE no se toca. ¿Continuar?',
-      )
-    ) {
-      return;
-    }
+  async function runWipe(reason?: string) {
+    if (!reason) return;
+    setConfirmWipe(false);
     setBusy(true);
-    setError('');
     try {
       const data = await api<WipeResult>('/schedule-engine/wipe-planificada', {
         method: 'POST',
-        body: JSON.stringify({ reason: reason.trim() }),
-        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason }),
       });
       setWipeInfo(data);
       setApplied(null);
       setPreview(null);
       setSwapInfo(null);
+      toast.warning(
+        `${data.cronogramas_eliminados} cronograma(s) PLANIFICADA eliminado(s).`,
+        'Tabula rasa aplicada',
+      );
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Error en tabula rasa');
+      toast.error(err instanceof ApiError ? err.message : 'Error en tabula rasa');
     } finally {
       setBusy(false);
     }
   }
 
   async function runPairSwap() {
-    setTouched({ from: true, to: true });
+    setConfirmSwap(false);
     if (dateIssues.length) {
-      setError(dateIssues[0].message);
+      toast.warning(dateIssues[0].message, 'Rango inválido');
       return;
     }
     setBusy(true);
-    setError('');
     try {
       const data = await api<SwapResult>('/schedule-engine/linked-pair/swap', {
         method: 'POST',
@@ -176,35 +182,38 @@ export function ProjectionPage() {
           date_to: dateTo,
           reason: `Intercambio Haro–Ramos ${dateFrom}→${dateTo}`,
         }),
-        headers: { 'Content-Type': 'application/json' },
       });
       setSwapInfo(data);
-    } catch (err) {
-      setError(
-        err instanceof ApiError ? err.message : 'Error al registrar intercambio',
+      toast.success(
+        data.pair.map((p) => `${p.inspector} ${p.from_mobile}→${p.to_mobile}`).join(' · '),
+        'Swap registrado',
       );
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Error al registrar intercambio');
     } finally {
       setBusy(false);
     }
   }
 
   async function runApplyReal() {
-    setTouched({ from: true, to: true });
+    setConfirmReal(false);
     if (dateIssues.length) {
-      setError(dateIssues[0].message);
+      toast.warning(dateIssues[0].message, 'Rango inválido');
       return;
     }
     setBusy(true);
-    setError('');
     try {
       const data = await api<ApplyResult>('/schedule-engine/apply-real', {
         method: 'POST',
         body: JSON.stringify({ date_from: dateFrom, date_to: dateTo }),
-        headers: { 'Content-Type': 'application/json' },
       });
       setApplied(data);
+      toast.success(
+        `REAL ${data.codigo} v${data.numero_version} generado.`,
+        'REAL creado',
+      );
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Error al generar REAL');
+      toast.error(err instanceof ApiError ? err.message : 'Error al generar REAL');
     } finally {
       setBusy(false);
     }
@@ -222,44 +231,86 @@ export function ProjectionPage() {
         </div>
       </header>
 
-      {error ? <div className="error-box">{error}</div> : null}
+      <ol className="stepper" aria-label="Pasos del motor">
+        {[
+          { n: 1, label: 'Elegir rango' },
+          { n: 2, label: 'Vista previa' },
+          { n: 3, label: 'Generar PLANIFICADA' },
+          { n: 4, label: 'Overlays (swap + REAL)' },
+        ].map((s) => (
+          <li
+            key={s.n}
+            className={`step ${
+              currentStep === s.n
+                ? 'current'
+                : currentStep > s.n
+                  ? 'done'
+                  : ''
+            }`}
+          >
+            <span className="num">{s.n}</span>
+            <span>{s.label}</span>
+          </li>
+        ))}
+      </ol>
+
       {wipeInfo ? (
-        <div className="panel">
-          Tabula rasa OK: {wipeInfo.cronogramas_eliminados} cronograma(s)
-          eliminado(s). {wipeInfo.next}
+        <div className="callout warn">
+          <div className="callout-body">
+            <div className="callout-title">Tabula rasa aplicada</div>
+            {wipeInfo.cronogramas_eliminados} cronograma(s) PLANIFICADA eliminado(s).{' '}
+            {wipeInfo.next}
+          </div>
         </div>
       ) : null}
       {swapInfo ? (
-        <div className="panel">
-          Intercambio registrado:{' '}
-          {swapInfo.pair
-            .map((p) => `${p.inspector} ${p.from_mobile}→${p.to_mobile}`)
-            .join(' · ')}
-          . {swapInfo.next}
+        <div className="callout info">
+          <div className="callout-body">
+            <div className="callout-title">Intercambio registrado</div>
+            {swapInfo.pair
+              .map((p) => `${p.inspector} ${p.from_mobile}→${p.to_mobile}`)
+              .join(' · ')}
+            . {swapInfo.next}
+          </div>
         </div>
       ) : null}
       {applied ? (
-        <div className="panel">
-          Versión {applied.layer ? `(${applied.layer}) ` : ''}
-          <strong>{applied.codigo}</strong> v{applied.numero_version}
-          {applied.days_inserted != null
-            ? ` · ${applied.days_inserted} días`
-            : null}
-          {applied.days_copied != null
-            ? ` · ${applied.days_copied} copiados`
-            : null}
-          {applied.overlays_applied != null
-            ? ` · ${applied.overlays_applied} overlays`
-            : null}
-          {applied.derived_from_plan
-            ? ` · desde ${applied.derived_from_plan}`
-            : null}
-          .{' '}
-          <Link to="/calendario">Ver en Cronograma</Link>
+        <div className="callout success">
+          <div className="callout-body">
+            <div className="callout-title">
+              Versión {applied.layer ? `(${applied.layer}) ` : ''}
+              {applied.codigo} v{applied.numero_version}
+            </div>
+            {applied.days_inserted != null
+              ? `${applied.days_inserted} días insertados`
+              : ''}
+            {applied.days_copied != null
+              ? ` · ${applied.days_copied} copiados`
+              : ''}
+            {applied.overlays_applied != null
+              ? ` · ${applied.overlays_applied} overlays`
+              : ''}
+            {applied.derived_from_plan
+              ? ` · desde ${applied.derived_from_plan}`
+              : ''}
+            .{' '}
+            <Link to="/cronograma-planificado">Ver planificado →</Link>
+          </div>
         </div>
       ) : null}
 
       <section className="panel">
+        <DateRangePresets
+          from={dateFrom}
+          to={dateTo}
+          onApply={(f, t) => {
+            setTouched({ from: true, to: true });
+            setDateFrom(f);
+            setDateTo(t);
+            setPreview(null);
+          }}
+          include={['this-month', 'next-month', 'next-30', 'next-90', 'next-year']}
+        />
         <form className="filters" onSubmit={runPreview} noValidate>
           <div className="field">
             <label htmlFor="from">Desde</label>
@@ -272,7 +323,10 @@ export function ProjectionPage() {
               aria-invalid={Boolean(fromError)}
               className={fromError ? 'input-invalid' : undefined}
               onBlur={() => setTouched((t) => ({ ...t, from: true }))}
-              onChange={(e) => setDateFrom(e.target.value)}
+              onChange={(e) => {
+                setDateFrom(e.target.value);
+                setPreview(null);
+              }}
             />
             {fromError ? (
               <p className="field-error" role="alert">
@@ -291,7 +345,10 @@ export function ProjectionPage() {
               aria-invalid={Boolean(toError)}
               className={toError ? 'input-invalid' : undefined}
               onBlur={() => setTouched((t) => ({ ...t, to: true }))}
-              onChange={(e) => setDateTo(e.target.value)}
+              onChange={(e) => {
+                setDateTo(e.target.value);
+                setPreview(null);
+              }}
             />
             {toError ? (
               <p className="field-error" role="alert">
@@ -304,13 +361,14 @@ export function ProjectionPage() {
             type="submit"
             disabled={busy || !datesValid}
           >
-            Vista previa PLAN
+            {busy && !preview ? 'Calculando…' : 'Vista previa'}
           </button>
           <button
             className="btn amber"
             type="button"
             disabled={busy || !datesValid || !preview}
-            onClick={() => void runApply()}
+            onClick={() => setConfirmApply(true)}
+            title={!preview ? 'Ejecutá una vista previa primero' : undefined}
           >
             Generar PLANIFICADA
           </button>
@@ -318,7 +376,7 @@ export function ProjectionPage() {
             className="btn"
             type="button"
             disabled={busy || !datesValid}
-            onClick={() => void runPairSwap()}
+            onClick={() => setConfirmSwap(true)}
           >
             Registrar swap Haro–Ramos
           </button>
@@ -326,15 +384,15 @@ export function ProjectionPage() {
             className="btn"
             type="button"
             disabled={busy || !datesValid}
-            onClick={() => void runApplyReal()}
+            onClick={() => setConfirmReal(true)}
           >
             Generar REAL
           </button>
           <button
-            className="btn secondary"
+            className="btn danger"
             type="button"
             disabled={busy}
-            onClick={() => void runWipe()}
+            onClick={() => setConfirmWipe(true)}
           >
             Tabula rasa PLAN
           </button>
@@ -345,9 +403,9 @@ export function ProjectionPage() {
           </p>
         ) : (
           <p className="muted" style={{ marginBottom: 0 }}>
-            1) Tabula rasa PLAN si hace falta · 2) Vista previa + Generar
-            PLANIFICADA · 3) Registrar swap Haro–Ramos · 4) Generar REAL.
-            Máximo {PROJECTION_MAX_DAYS} días.
+            Flujo sugerido: (1) elegí el rango, (2) mirá la vista previa,
+            (3) generá la PLANIFICADA, (4) opcionalmente registrá swap y
+            generá el REAL. Sin tope operativo de días.
           </p>
         )}
       </section>
@@ -431,6 +489,50 @@ export function ProjectionPage() {
           </section>
         </>
       ) : null}
+
+      <ConfirmDialog
+        open={confirmApply}
+        title="Generar PLANIFICADA"
+        message={`Se creará una nueva versión PLANIFICADA para el rango ${dateFrom} → ${dateTo}. Podrás observarla y aprobarla luego.`}
+        confirmLabel="Generar ahora"
+        tone="default"
+        onCancel={() => setConfirmApply(false)}
+        onConfirm={() => runApply()}
+      />
+
+      <ConfirmDialog
+        open={confirmSwap}
+        title="Registrar swap Haro–Ramos"
+        message={`Se registrará un intercambio para el rango ${dateFrom} → ${dateTo}. Afecta a la próxima generación REAL.`}
+        confirmLabel="Registrar swap"
+        tone="default"
+        onCancel={() => setConfirmSwap(false)}
+        onConfirm={() => runPairSwap()}
+      />
+
+      <ConfirmDialog
+        open={confirmReal}
+        title="Generar cronograma REAL"
+        message={`Se generará la capa REAL (PLAN + overlays operativos) para ${dateFrom} → ${dateTo}.`}
+        confirmLabel="Generar REAL"
+        tone="default"
+        onCancel={() => setConfirmReal(false)}
+        onConfirm={() => runApplyReal()}
+      />
+
+      <ConfirmDialog
+        open={confirmWipe}
+        title="Eliminar todas las PLANIFICADAS"
+        message="Se eliminarán todos los cronogramas de la capa PLANIFICADA. La BASE no se toca. Esta acción es irreversible."
+        confirmLabel="Sí, eliminar"
+        cancelLabel="Cancelar"
+        tone="danger"
+        requireReason
+        reasonPlaceholder="Regeneración limpia sin overlays operativos"
+        typeToConfirm="TABULA RASA"
+        onCancel={() => setConfirmWipe(false)}
+        onConfirm={(reason) => runWipe(reason)}
+      />
     </div>
   );
 }

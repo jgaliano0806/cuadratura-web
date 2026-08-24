@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
+import { EmptyState, SkeletonTable, useToast } from '../components/ui';
 
 type Position = {
   posicion_codigo: string;
@@ -14,13 +15,17 @@ type Position = {
 };
 
 export function Mobile4Page() {
+  const toast = useToast();
   const [rows, setRows] = useState<Position[]>([]);
-  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(true);
 
   useEffect(() => {
+    setBusy(true);
     api<Position[]>('/operations/mobile4/positions')
       .then(setRows)
-      .catch((e) => setError(e.message));
+      .catch((e) => toast.error(e.message ?? 'Error al cargar Móvil 4.'))
+      .finally(() => setBusy(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
@@ -31,8 +36,6 @@ export function Mobile4Page() {
           <p>Ocupantes vigentes de las posiciones continuas (incluye EXT vinculada).</p>
         </div>
       </header>
-
-      {error ? <div className="error-box">{error}</div> : null}
 
       <section className="panel">
         <table className="data">
@@ -47,10 +50,16 @@ export function Mobile4Page() {
             </tr>
           </thead>
           <tbody>
-            {rows.length === 0 ? (
+            {busy && !rows.length ? (
+              <SkeletonTable cols={6} rows={4} />
+            ) : rows.length === 0 ? (
               <tr>
-                <td colSpan={6} className="muted">
-                  Sin posiciones Móvil 4 vigentes.
+                <td colSpan={6} style={{ padding: 0 }}>
+                  <EmptyState
+                    compact
+                    title="Sin posiciones Móvil 4 vigentes"
+                    description="Verificá el seed de Móvil 4 y las vigencias activas."
+                  />
                 </td>
               </tr>
             ) : (

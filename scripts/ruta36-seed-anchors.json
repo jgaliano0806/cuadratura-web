@@ -1,0 +1,1118 @@
+{
+  "results": [
+    {
+      "name": "Fanloo",
+      "kind": "M6",
+      "state": {
+        "cyclePosition": 6,
+        "shift": null,
+        "mobile": null,
+        "shiftIndex": 1,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": -8,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          6
+        ]
+      }
+    },
+    {
+      "name": "Scagnetti",
+      "kind": "M6",
+      "state": {
+        "cyclePosition": 3,
+        "shift": "T",
+        "mobile": 6,
+        "shiftIndex": 2,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": -8,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          6
+        ]
+      }
+    },
+    {
+      "name": "López J.",
+      "kind": "M6",
+      "state": {
+        "cyclePosition": 0,
+        "shift": "M",
+        "mobile": 6,
+        "shiftIndex": 0,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": -8,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          6
+        ]
+      }
+    },
+    {
+      "name": "Cingolani",
+      "kind": "M6",
+      "state": {
+        "cyclePosition": 5,
+        "shift": null,
+        "mobile": null,
+        "shiftIndex": 0,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": -8,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          6
+        ]
+      }
+    },
+    {
+      "name": "Torres",
+      "kind": "M6",
+      "state": {
+        "cyclePosition": 2,
+        "shift": "N",
+        "mobile": 6,
+        "shiftIndex": 1,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": -8,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          6
+        ]
+      }
+    },
+    {
+      "name": "Coria",
+      "kind": "M7",
+      "state": {
+        "cyclePosition": 3,
+        "shift": "M",
+        "mobile": 7,
+        "shiftIndex": 0,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": -8,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          7
+        ]
+      }
+    },
+    {
+      "name": "Fernandez L.",
+      "kind": "M7",
+      "state": {
+        "cyclePosition": 0,
+        "shift": "N",
+        "mobile": 7,
+        "shiftIndex": 1,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": -8,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          7
+        ]
+      }
+    },
+    {
+      "name": "Falco",
+      "kind": "M7",
+      "state": {
+        "cyclePosition": 5,
+        "shift": null,
+        "mobile": null,
+        "shiftIndex": 1,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": -8,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          7
+        ]
+      }
+    },
+    {
+      "name": "Zeballe",
+      "kind": "M7",
+      "state": {
+        "cyclePosition": 2,
+        "shift": "T",
+        "mobile": 7,
+        "shiftIndex": 2,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": -8,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          7
+        ]
+      }
+    },
+    {
+      "name": "Coronel R36",
+      "kind": "M7",
+      "state": {
+        "cyclePosition": 7,
+        "shift": null,
+        "mobile": null,
+        "shiftIndex": 2,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": -8,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          7
+        ]
+      }
+    },
+    {
+      "name": "Carranza G.",
+      "kind": "M4",
+      "state": {
+        "cyclePosition": 3,
+        "shift": "M",
+        "mobile": 4,
+        "shiftIndex": 0,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": -8,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          4
+        ]
+      }
+    },
+    {
+      "name": "Carranza M.",
+      "kind": "M4",
+      "state": {
+        "cyclePosition": 6,
+        "shift": null,
+        "mobile": null,
+        "shiftIndex": 2,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": -8,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          4
+        ]
+      }
+    },
+    {
+      "name": "Mainardi",
+      "kind": "M4",
+      "state": {
+        "cyclePosition": 1,
+        "shift": "T",
+        "mobile": 4,
+        "shiftIndex": 2,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": -8,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          4
+        ]
+      }
+    },
+    {
+      "name": "Haro",
+      "kind": "M4",
+      "state": {
+        "cyclePosition": 4,
+        "shift": "N",
+        "mobile": 4,
+        "shiftIndex": 1,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": -8,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          4
+        ]
+      }
+    },
+    {
+      "name": "Del Bel",
+      "kind": "M4",
+      "state": {
+        "cyclePosition": 7,
+        "shift": null,
+        "mobile": null,
+        "shiftIndex": 0,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": -8,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          4
+        ]
+      }
+    },
+    {
+      "name": "Garate",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 3,
+        "shift": "T",
+        "mobile": 1,
+        "shiftIndex": 2,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": 3,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Gimenez P.",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 4,
+        "shift": "M",
+        "mobile": 1,
+        "shiftIndex": 0,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": 3,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Coronel",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 6,
+        "shift": null,
+        "mobile": null,
+        "shiftIndex": 1,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": 4,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Almada",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 7,
+        "shift": null,
+        "mobile": null,
+        "shiftIndex": 0,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": 4,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Grandi",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 0,
+        "shift": "M",
+        "mobile": 5,
+        "shiftIndex": 0,
+        "mobileIndex": 1,
+        "completedBlocksOnMobile": 0,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Tejada",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 7,
+        "shift": null,
+        "mobile": null,
+        "shiftIndex": 2,
+        "mobileIndex": 3,
+        "completedBlocksOnMobile": 4,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Acosta",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 4,
+        "shift": "M",
+        "mobile": 2,
+        "shiftIndex": 0,
+        "mobileIndex": 3,
+        "completedBlocksOnMobile": 3,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Martinez J.",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 5,
+        "shift": null,
+        "mobile": null,
+        "shiftIndex": 1,
+        "mobileIndex": 3,
+        "completedBlocksOnMobile": 4,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Peralta M.",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 2,
+        "shift": "T",
+        "mobile": 2,
+        "shiftIndex": 2,
+        "mobileIndex": 3,
+        "completedBlocksOnMobile": 3,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Zambrano N.",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 0,
+        "shift": "N",
+        "mobile": 1,
+        "shiftIndex": 1,
+        "mobileIndex": 0,
+        "completedBlocksOnMobile": 0,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Capdevila",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 6,
+        "shift": null,
+        "mobile": null,
+        "shiftIndex": 2,
+        "mobileIndex": 2,
+        "completedBlocksOnMobile": 4,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Sandoval",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 1,
+        "shift": "T",
+        "mobile": 3,
+        "shiftIndex": 2,
+        "mobileIndex": 2,
+        "completedBlocksOnMobile": 3,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Lungrin",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 7,
+        "shift": null,
+        "mobile": null,
+        "shiftIndex": 0,
+        "mobileIndex": 2,
+        "completedBlocksOnMobile": 4,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Giuliani",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 4,
+        "shift": "N",
+        "mobile": 3,
+        "shiftIndex": 1,
+        "mobileIndex": 2,
+        "completedBlocksOnMobile": 3,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Tissera",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 3,
+        "shift": "M",
+        "mobile": 3,
+        "shiftIndex": 0,
+        "mobileIndex": 2,
+        "completedBlocksOnMobile": 3,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Martinez F.",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 0,
+        "shift": "N",
+        "mobile": 3,
+        "shiftIndex": 1,
+        "mobileIndex": 2,
+        "completedBlocksOnMobile": 0,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Zambrano M.",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 3,
+        "shift": "M",
+        "mobile": 5,
+        "shiftIndex": 0,
+        "mobileIndex": 1,
+        "completedBlocksOnMobile": 3,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Barrera P.",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 6,
+        "shift": null,
+        "mobile": null,
+        "shiftIndex": 2,
+        "mobileIndex": 1,
+        "completedBlocksOnMobile": 4,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Carletto G.",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 1,
+        "shift": "T",
+        "mobile": 5,
+        "shiftIndex": 2,
+        "mobileIndex": 1,
+        "completedBlocksOnMobile": 3,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Ramos G.",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 4,
+        "shift": "N",
+        "mobile": 5,
+        "shiftIndex": 1,
+        "mobileIndex": 1,
+        "completedBlocksOnMobile": 3,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Flores J.",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 2,
+        "shift": "N",
+        "mobile": 5,
+        "shiftIndex": 1,
+        "mobileIndex": 1,
+        "completedBlocksOnMobile": 0,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "name": "Bendayán",
+      "kind": "GEN",
+      "state": {
+        "cyclePosition": 5,
+        "shift": null,
+        "mobile": null,
+        "shiftIndex": 0,
+        "mobileIndex": 1,
+        "completedBlocksOnMobile": 4,
+        "shifts": [
+          "M",
+          "N",
+          "T"
+        ],
+        "mobiles": [
+          1,
+          5,
+          3,
+          2
+        ]
+      }
+    }
+  ],
+  "errors": [
+    {
+      "name": "Garate",
+      "day": 61,
+      "expected": "N2",
+      "got": "N3"
+    },
+    {
+      "name": "Garate",
+      "day": 62,
+      "expected": "N2",
+      "got": "N3"
+    },
+    {
+      "name": "Garate",
+      "day": 63,
+      "expected": "N2",
+      "got": "N3"
+    },
+    {
+      "name": "Garate",
+      "day": 64,
+      "expected": "N2",
+      "got": "N3"
+    },
+    {
+      "name": "Garate",
+      "day": 65,
+      "expected": "N2",
+      "got": "N3"
+    },
+    {
+      "name": "Martinez J.",
+      "day": 91,
+      "expected": "N2",
+      "got": "N3"
+    },
+    {
+      "name": "Peralta M.",
+      "day": 30,
+      "expected": "M5",
+      "got": "M1"
+    },
+    {
+      "name": "Peralta M.",
+      "day": 31,
+      "expected": "M5",
+      "got": "M1"
+    },
+    {
+      "name": "Peralta M.",
+      "day": 32,
+      "expected": "M5",
+      "got": "M1"
+    },
+    {
+      "name": "Peralta M.",
+      "day": 33,
+      "expected": "M5",
+      "got": "M1"
+    },
+    {
+      "name": "Peralta M.",
+      "day": 34,
+      "expected": "M5",
+      "got": "M1"
+    },
+    {
+      "name": "Peralta M.",
+      "day": 62,
+      "expected": "N3",
+      "got": "N5"
+    },
+    {
+      "name": "Peralta M.",
+      "day": 63,
+      "expected": "N3",
+      "got": "N5"
+    },
+    {
+      "name": "Peralta M.",
+      "day": 64,
+      "expected": "N3",
+      "got": "N5"
+    },
+    {
+      "name": "Peralta M.",
+      "day": 65,
+      "expected": "N3",
+      "got": "N5"
+    },
+    {
+      "name": "Peralta M.",
+      "day": 66,
+      "expected": "N3",
+      "got": "N5"
+    },
+    {
+      "name": "Sandoval",
+      "day": 31,
+      "expected": "M1",
+      "got": "M2"
+    },
+    {
+      "name": "Sandoval",
+      "day": 32,
+      "expected": "M1",
+      "got": "M2"
+    },
+    {
+      "name": "Sandoval",
+      "day": 33,
+      "expected": "M1",
+      "got": "M2"
+    },
+    {
+      "name": "Sandoval",
+      "day": 34,
+      "expected": "M1",
+      "got": "M2"
+    },
+    {
+      "name": "Sandoval",
+      "day": 35,
+      "expected": "M1",
+      "got": "M2"
+    },
+    {
+      "name": "Sandoval",
+      "day": 63,
+      "expected": "N5",
+      "got": "N1"
+    },
+    {
+      "name": "Sandoval",
+      "day": 64,
+      "expected": "N5",
+      "got": "N1"
+    },
+    {
+      "name": "Sandoval",
+      "day": 65,
+      "expected": "N5",
+      "got": "N1"
+    },
+    {
+      "name": "Sandoval",
+      "day": 66,
+      "expected": "N5",
+      "got": "N1"
+    },
+    {
+      "name": "Sandoval",
+      "day": 67,
+      "expected": "N5",
+      "got": "N1"
+    },
+    {
+      "name": "Tissera",
+      "day": 61,
+      "expected": "T5",
+      "got": "T1"
+    },
+    {
+      "name": "Tissera",
+      "day": 62,
+      "expected": "T5",
+      "got": "T1"
+    },
+    {
+      "name": "Tissera",
+      "day": 63,
+      "expected": "T5",
+      "got": "T1"
+    },
+    {
+      "name": "Tissera",
+      "day": 64,
+      "expected": "T5",
+      "got": "T1"
+    },
+    {
+      "name": "Tissera",
+      "day": 65,
+      "expected": "T5",
+      "got": "T1"
+    },
+    {
+      "name": "Zambrano M.",
+      "day": 37,
+      "expected": "T3",
+      "got": "T2"
+    },
+    {
+      "name": "Zambrano M.",
+      "day": 38,
+      "expected": "T3",
+      "got": "T2"
+    },
+    {
+      "name": "Zambrano M.",
+      "day": 39,
+      "expected": "T3",
+      "got": "T2"
+    },
+    {
+      "name": "Zambrano M.",
+      "day": 40,
+      "expected": "T3",
+      "got": "T2"
+    },
+    {
+      "name": "Zambrano M.",
+      "day": 41,
+      "expected": "T3",
+      "got": "T2"
+    },
+    {
+      "name": "Zambrano M.",
+      "day": 61,
+      "expected": "T1",
+      "got": "T2"
+    },
+    {
+      "name": "Zambrano M.",
+      "day": 62,
+      "expected": "T1",
+      "got": "T2"
+    },
+    {
+      "name": "Zambrano M.",
+      "day": 63,
+      "expected": "T1",
+      "got": "T2"
+    },
+    {
+      "name": "Zambrano M.",
+      "day": 64,
+      "expected": "T1",
+      "got": "T2"
+    },
+    {
+      "name": "Zambrano M.",
+      "day": 65,
+      "expected": "T1",
+      "got": "T2"
+    },
+    {
+      "name": "Carletto G.",
+      "day": 31,
+      "expected": "M2",
+      "got": "M3"
+    },
+    {
+      "name": "Carletto G.",
+      "day": 32,
+      "expected": "M2",
+      "got": "M3"
+    },
+    {
+      "name": "Carletto G.",
+      "day": 33,
+      "expected": "M2",
+      "got": "M3"
+    },
+    {
+      "name": "Carletto G.",
+      "day": 34,
+      "expected": "M2",
+      "got": "M3"
+    },
+    {
+      "name": "Carletto G.",
+      "day": 35,
+      "expected": "M2",
+      "got": "M3"
+    },
+    {
+      "name": "Carletto G.",
+      "day": 63,
+      "expected": "N1",
+      "got": "N2"
+    },
+    {
+      "name": "Carletto G.",
+      "day": 64,
+      "expected": "N1",
+      "got": "N2"
+    },
+    {
+      "name": "Carletto G.",
+      "day": 65,
+      "expected": "N1",
+      "got": "N2"
+    },
+    {
+      "name": "Carletto G.",
+      "day": 66,
+      "expected": "N1",
+      "got": "N2"
+    },
+    {
+      "name": "Carletto G.",
+      "day": 67,
+      "expected": "N1",
+      "got": "N2"
+    }
+  ]
+}

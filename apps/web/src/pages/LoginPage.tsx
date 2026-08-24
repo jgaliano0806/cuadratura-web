@@ -2,6 +2,8 @@ import { FormEvent, useState } from 'react';
 import { Navigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 import { ApiError } from '../lib/api';
+import { BrandMark } from '../components/BrandMark';
+import { ThemeToggle } from '../components/ThemeToggle';
 
 export function LoginPage() {
   const { user, login } = useAuth();
@@ -27,11 +29,24 @@ export function LoginPage() {
 
   return (
     <div className="login-page">
+      <div className="login-theme-float">
+        <ThemeToggle variant="topbar" cycleSystem />
+      </div>
+
       <div className="login-card">
-        <div className="eyebrow">Seguridad Vial</div>
-        <h1>CASISA</h1>
-        <p className="muted">Acceso a la cuadratura operativa de inspectores y móviles.</p>
+        <div className="login-brand-stack">
+          <BrandMark size={96} />
+        </div>
+
+        <div className="eyebrow">Seguridad Vial · CASISA</div>
+        <h1>Cuadratura operativa</h1>
+        <p className="muted">
+          Acceso a la planificación de inspectores, móviles y cobertura
+          (Caminos de las Sierras).
+        </p>
+
         {error ? <div className="error-box">{error}</div> : null}
+
         <form onSubmit={onSubmit}>
           <div className="field">
             <label htmlFor="username">Usuario</label>

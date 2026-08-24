@@ -1,4 +1,4 @@
-# Documentación Plataforma de Inspectores — Versión 2.6
+# Documentación Plataforma de Inspectores — Versión 2.7
 
 Comenzar por:
 
@@ -70,3 +70,13 @@ La regla de control es simple: una sola numeración de reglas y trazabilidad com
 - Tablero de huecos con SQL, API y página web.
 - Propuestas y asignación de trabajos a demanda por huecos, prioridad T → N → M.
 - Migración V011 y paquete ejecutable en `implementation/`.
+
+## Cambios 2.7
+
+- Se elimina la inicialización por Excel como flujo operativo. El módulo `bootstrap-initialization`, la página `Inicialización` y las rutas `/initialization` quedan retirados del sistema.
+- El estado inicial oficial pasa a ser un **seed operativo directo** (script `scripts/seed-catalogos.mjs`) con corte al **01/06/2026**, sin capa BASE.
+- Se persiste explícitamente el campo `estado_inicial_posicion.bloques_completados_movil` (0..4) para que el motor sepa cuándo rotar de móvil bajo la regla `1 → 5 → 3 → 2 → 1` (migración `V022`).
+- Ruta 36 (móviles 6 y 7) queda operativa con sus dos cuadraturas fijas (perfiles `MOVIL6_FIJO` / `MOVIL7_FIJO`), 5 posiciones por móvil, base Ruta 36.
+- Migraciones nuevas: `V019` (extensión de esquema para móviles 6–7), `V020` (seed catálogo Ruta 36), `V021` (wipe operativo), `V022` (bloques completados).
+- La secuencia general queda fijada en `1 → 5 → 3 → 2 → 1` con exactamente **4 bloques por móvil** antes de rotar; los móviles 4, 6 y 7 no rotan.
+- Verificación end-to-end: los 37 inspectores proyectados desde el 01/06/2026 coinciden con las cuadraturas provistas en sus primeros ~30 días; las divergencias posteriores puntuales quedan tipificadas como typos de planilla.
