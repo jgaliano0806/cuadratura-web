@@ -4,7 +4,11 @@ build/
 .env
 *.log
 .DS_Store
-coverage/
+# Reportes de cobertura de tests. Anclado a la raiz de cada workspace: sin la
+# barra inicial tambien matchea src/modules/coverage, que es codigo fuente y
+# quedaba fuera del repo (rompia el build: app.module.ts importa CoverageModule).
+/coverage/
+apps/*/coverage/
 .vite/
 uploads/
 *.xlsx
