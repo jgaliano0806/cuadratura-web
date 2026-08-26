@@ -33,7 +33,12 @@ export class PlanningService {
               p.codigo AS posicion_codigo,
               i.id AS inspector_id,
               i.legajo,
+              i.nombres,
+              i.apellido,
               i.nombre_completo AS inspector,
+              lic.licencia_codigo,
+              lic.color_fondo AS licencia_color_fondo,
+              lic.color_letra AS licencia_color_letra,
               it.nombre_completo AS inspector_titular,
               ia.nombre_completo AS inspector_asignado
        FROM seguridad_vial.dia_cronograma d
@@ -51,7 +56,25 @@ export class PlanningService {
          LIMIT 1
        ) resolved ON true
        LEFT JOIN seguridad_vial.inspector i ON i.id = resolved.inspector_id
+       LEFT JOIN LATERAL (
+         SELECT cl.codigo AS licencia_codigo,
+                cl.color_fondo,
+                cl.color_letra
+         FROM seguridad_vial.asignacion_operativa ao
+         JOIN seguridad_vial.catalogo_licencia cl ON cl.id = ao.catalogo_licencia_id
+         WHERE ao.estado = 'ACTIVA'
+           AND ao.tipo = 'LICENCIA'
+           AND ao.tipo_dia = 'LICENCIA'
+           AND ao.inspector_id = resolved.inspector_id
+           AND d.fecha_operativa >= ao.fecha_desde
+           AND (ao.fecha_hasta IS NULL OR d.fecha_operativa <= ao.fecha_hasta)
+         ORDER BY ao.creada_en DESC
+         LIMIT 1
+       ) lic ON true
        WHERE d.version_id = $1
+         AND i.id IS NOT NULL
+         AND i.estado = 'ACTIVO'
+         AND i.tipo_plantel <> 'PEAJISTA'
          AND ($2::date IS NULL OR d.fecha_operativa >= $2)
          AND ($3::date IS NULL OR d.fecha_operativa <= $3)
          AND ($4::int IS NULL OR m.numero = $4)
@@ -69,7 +92,7 @@ export class PlanningService {
               CASE WHEN cd.responsable_aceptacion_id IS NULL AND cd.estado = 'HUECO'
                    THEN 'PENDIENTE' ELSE 'OK' END AS aceptacion
        FROM seguridad_vial.cobertura_dia cd
-       JOIN seguridad_vial.movil m ON m.id = cd.movil_id
+       JOIN seguridad_vial.movil m ON m.id = cd.movil_id AND m.estado = 'ACTIVO'
        WHERE cd.version_id = $1
          AND ($2::date IS NULL OR cd.fecha_operativa >= $2)
          AND ($3::date IS NULL OR cd.fecha_operativa <= $3)

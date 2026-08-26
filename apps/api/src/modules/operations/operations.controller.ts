@@ -1,4 +1,4 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { OperationsService } from './operations.service';
 
@@ -20,5 +20,15 @@ export class OperationsController {
   @Get('inspectors')
   inspectors() {
     return this.operations.listInspectors();
+  }
+
+  @Get('licencias')
+  licencias(@Query('activas') activas?: string) {
+    return this.operations.listLicencias(activas === '1' || activas === 'true');
+  }
+
+  @Get('mobiles')
+  mobiles() {
+    return this.operations.listMobiles();
   }
 }

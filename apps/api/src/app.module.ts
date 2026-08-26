@@ -4,6 +4,7 @@ import { ConfigModule } from '@nestjs/config';
 import { DatabaseModule } from './database/database.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { CoverageModule } from './modules/coverage/coverage.module';
+import { ExportsModule } from './modules/exports/exports.module';
 import { OperationsModule } from './modules/operations/operations.module';
 import { PlanningModule } from './modules/planning/planning.module';
 import { VacationsModule } from './modules/vacations/vacations.module';
@@ -25,6 +26,7 @@ import { HealthController } from './health.controller';
     DatabaseModule,
     IdentityModule,
     CoverageModule,
+    ExportsModule,
     OperationsModule,
     PlanningModule,
     VacationsModule,

@@ -41,10 +41,38 @@ export class OperationsService {
 
   async listInspectors() {
     const result = await this.db.query(
-      `SELECT id, nombre_completo, estado
+      `SELECT id,
+              legajo,
+              nombres,
+              apellido,
+              nombre_completo,
+              tipo_plantel,
+              estado
        FROM seguridad_vial.inspector
        WHERE estado = 'ACTIVO'
-       ORDER BY nombre_completo`,
+         AND tipo_plantel <> 'PEAJISTA'
+       ORDER BY coalesce(apellido, nombre_completo), coalesce(nombres, ''), legajo`,
+    );
+    return result.rows;
+  }
+
+  async listLicencias(soloActivas = false) {
+    const result = await this.db.query(
+      `SELECT id, codigo, nombre, activo, orden, color_fondo, color_letra
+       FROM seguridad_vial.catalogo_licencia
+       WHERE ($1::boolean IS NOT TRUE OR activo = true)
+       ORDER BY orden, nombre`,
+      [soloActivas],
+    );
+    return result.rows;
+  }
+
+  async listMobiles() {
+    const result = await this.db.query(
+      `SELECT id, numero, capacidad_maxima, estado
+       FROM seguridad_vial.movil
+       WHERE estado = 'ACTIVO'
+       ORDER BY numero`,
     );
     return result.rows;
   }
