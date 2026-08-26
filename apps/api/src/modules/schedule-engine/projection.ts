@@ -2,7 +2,20 @@
  * Motor de proyección de cuadratura (doc 07_Algoritmo_Generacion_Cronograma).
  *
  * Ciclo 5×3 · turnos M→N→T · móviles según perfil.
- * El móvil avanza cada 4 bloques de trabajo completados (evidencia Excel Acosta/Gimenez).
+ *
+ * El móvil avanza **un paso del ciclo por mes calendario**, resuelto en el
+ * inicio del bloque: el primer bloque que arranca en el mes nuevo toma el móvil
+ * nuevo (doc 07 §5, "el móvil que corresponda a su configuración y al período
+ * de inicio"). Un bloque que cruza el fin de mes no se parte.
+ *
+ * No es "cada 4 bloques": 4 bloques son 32 días y un mes ~30,4, así que ambas
+ * reglas coinciden unos 3 meses y después derivan. En la cuadratura ideal
+ * jun–ago 2026 hay 10 de 32 tramos de móvil que duran 3 o 5 bloques, no 4.
+ *
+ * Un perfil de móvil fijo (móvil 4, Ruta 36) se expresa con `mobiles` de un solo
+ * elemento: el módulo lo deja constante sin necesidad de un caso especial.
+ *
+ * Verificado contra `__fixtures__/cuadratura-ideal-2026.json` (100%).
  */
 
 export type ShiftCode = 'M' | 'N' | 'T';
@@ -27,8 +40,12 @@ export type ProjectionInput = {
   mobileIndex: number | null;
   shifts: ShiftCode[];
   mobiles: number[];
-  /** Bloques TRABAJO consecutivos con el mismo móvil ya cerrados antes del estado. */
-  completedBlocksOnMobile: number;
+  /**
+   * @deprecated Sin efecto desde la cadencia mensual. El móvil ya no depende de
+   * cuántos bloques se completaron, sino del mes en que arranca cada bloque.
+   * Se conserva para no romper los llamadores; se puede eliminar.
+   */
+  completedBlocksOnMobile?: number;
 };
 
 export type ProjectedDay = {
@@ -66,12 +83,13 @@ export type EngineState = {
   mobile: number | null;
   shiftIndex: number;
   mobileIndex: number;
-  completedBlocksOnMobile: number;
+  /** Inicio del bloque al que corresponde `mobileIndex`. Ancla de la cadencia. */
+  mobileAnchorDate: string;
+  /** Índice de móvil vigente en `mobileAnchorDate`. */
+  mobileAnchorIndex: number;
   shifts: ShiftCode[];
   mobiles: number[];
 };
-
-const WORK_BLOCKS_PER_MOBILE = 4;
 
 export function addDaysIso(iso: string, days: number): string {
   const d = new Date(iso + 'T12:00:00Z');
@@ -83,6 +101,28 @@ export function diffDaysIso(a: string, b: string): number {
   const ms =
     Date.parse(b + 'T12:00:00Z') - Date.parse(a + 'T12:00:00Z');
   return Math.round(ms / 86_400_000);
+}
+
+/** Meses calendario completos entre dos fechas ISO (b - a). Puede ser negativo. */
+export function monthDiffIso(a: string, b: string): number {
+  const [ay, am] = a.split('-').map(Number);
+  const [by, bm] = b.split('-').map(Number);
+  return (by - ay) * 12 + (bm - am);
+}
+
+/**
+ * Móvil que corresponde a un bloque según el mes en que arranca.
+ * Con `mobiles` de un solo elemento (móvil fijo) devuelve siempre ese índice.
+ */
+function mobileIndexForBlock(
+  blockStart: string,
+  anchorBlockStart: string,
+  anchorIndex: number,
+  mobilesLength: number,
+): number {
+  if (mobilesLength <= 1) return 0;
+  const months = monthDiffIso(anchorBlockStart, blockStart);
+  return ((anchorIndex + months) % mobilesLength + mobilesLength) % mobilesLength;
 }
 
 function codeFor(dayType: DayType, shift: ShiftCode | null, mobile: number | null): string {
@@ -117,14 +157,21 @@ export function createState(input: ProjectionInput): EngineState {
     ? mobiles[mobileIndex] ?? input.mobile
     : null;
 
+  const cyclePosition = ((input.cyclePosition % 8) + 8) % 8;
+
+  // El bloque vigente arrancó `cyclePosition` días atrás — también durante el
+  // franco (posiciones 5..7), donde el móvil describe el bloque recién cerrado.
+  const mobileAnchorDate = addDaysIso(input.referenceDate, -cyclePosition);
+
   return {
     date: input.referenceDate,
-    cyclePosition: ((input.cyclePosition % 8) + 8) % 8,
+    cyclePosition,
     shift,
     mobile,
     shiftIndex,
     mobileIndex,
-    completedBlocksOnMobile: Math.max(0, input.completedBlocksOnMobile),
+    mobileAnchorDate,
+    mobileAnchorIndex: mobileIndex,
     shifts,
     mobiles,
   };
@@ -141,24 +188,28 @@ export function advanceOneDay(state: EngineState): EngineState {
     mobile,
     shiftIndex,
     mobileIndex,
-    completedBlocksOnMobile,
+    mobileAnchorDate,
+    mobileAnchorIndex,
     shifts,
     mobiles,
   } = state;
 
   // Cierre de bloque de trabajo (ciclo 4 → 5)
   if (from === 4 && to === 5) {
-    completedBlocksOnMobile += 1;
     shift = null;
     mobile = null;
   }
 
-  // Inicio de nuevo bloque de trabajo (ciclo 7 → 0)
+  // Inicio de nuevo bloque de trabajo (ciclo 7 → 0).
+  // El móvil se resuelve por el mes en que arranca ESTE bloque; nunca a mitad
+  // de bloque, de modo que un bloque que cruza el fin de mes no se parte.
   if (from === 7 && to === 0) {
-    if (completedBlocksOnMobile >= WORK_BLOCKS_PER_MOBILE) {
-      mobileIndex = (mobileIndex + 1) % mobiles.length;
-      completedBlocksOnMobile = 0;
-    }
+    mobileIndex = mobileIndexForBlock(
+      nextDate,
+      mobileAnchorDate,
+      mobileAnchorIndex,
+      mobiles.length,
+    );
     shiftIndex = (shiftIndex + 1) % shifts.length;
     shift = shifts[shiftIndex];
     mobile = mobiles[mobileIndex];
@@ -183,7 +234,8 @@ export function advanceOneDay(state: EngineState): EngineState {
     mobile,
     shiftIndex,
     mobileIndex,
-    completedBlocksOnMobile,
+    mobileAnchorDate,
+    mobileAnchorIndex,
     shifts,
     mobiles,
   };
@@ -335,4 +387,8 @@ export function groupIntoBlocks(days: ProjectedDay[]): Array<{
   return blocks;
 }
 
-export { WORK_BLOCKS_PER_MOBILE };
+/**
+ * @deprecated La cadencia del móvil es mensual, no por cantidad de bloques.
+ * Se conserva solo para no romper imports existentes.
+ */
+export const WORK_BLOCKS_PER_MOBILE = 4;
