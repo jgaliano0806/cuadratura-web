@@ -91,8 +91,8 @@ export function HomePage() {
   const presets = useMemo(() => buildPresets(), []);
   const thisMonth = presets.find((p) => p.id === 'this-month')!.range();
   const nextMonth = presets.find((p) => p.id === 'next-month')!.range();
-  const calendarThisMonth = `/cronograma-planificado?from=${thisMonth.from}&to=${thisMonth.to}`;
-  const calendarNextMonth = `/cronograma-planificado?from=${nextMonth.from}&to=${nextMonth.to}`;
+  const calendarThisMonth = `/inspectores?vista=ideal&from=${thisMonth.from}&to=${thisMonth.to}`;
+  const calendarNextMonth = `/inspectores?vista=ideal&from=${nextMonth.from}&to=${nextMonth.to}`;
 
   return (
     <div className="stack">
@@ -183,17 +183,17 @@ export function HomePage() {
         </h2>
         <div className="dash-actions">
           <Link className="btn" to={calendarThisMonth}>
-            Planificado · este mes
+            Ideal · este mes
           </Link>
           <Link className="btn secondary" to={calendarNextMonth}>
-            Planificado · próximo mes
+            Ideal · próximo mes
           </Link>
           <Link className="btn amber" to="/huecos">
             Tablero de huecos
           </Link>
           {isPrivileged ? (
-            <Link className="btn secondary" to="/proyeccion">
-              Motor de proyección
+            <Link className="btn secondary" to="/inspectores?vista=real">
+              Inspectores · Real
             </Link>
           ) : null}
           <Link className="btn secondary" to="/vacaciones">

@@ -4,4 +4,7 @@ export { DayDetailPanel } from './DayDetailPanel';
 export type { AbsenceKind } from './DayDetailPanel';
 export { ScheduleObjectBar } from './ScheduleObjectBar';
 export { SwapInspectorsModal } from './SwapInspectorsModal';
+export { LicenciasModal } from './LicenciasModal';
+export type { Licencia } from './LicenciasModal';
+export { PeajistaModal } from './PeajistaModal';
 export type { ScheduleTab, ScheduleMode } from './ScheduleObjectBar';

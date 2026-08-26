@@ -12,7 +12,7 @@ export function LoginPage() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
-  if (user) return <Navigate to="/" replace />;
+  if (user) return <Navigate to="/inspectores" replace />;
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();

@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -84,19 +85,32 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     [dismiss],
   );
 
-  const api: ToastApi = {
-    push,
-    success: (message, title) => push({ tone: 'success', message, title }),
-    error: (message, title) => push({ tone: 'error', message, title }),
-    info: (message, title) => push({ tone: 'info', message, title }),
-    warning: (message, title) => push({ tone: 'warning', message, title }),
-    dismiss,
-    clear: () => {
-      timers.current.forEach((h) => window.clearTimeout(h));
-      timers.current.clear();
-      setToasts([]);
-    },
-  };
+  const success = useCallback(
+    (message: string, title?: string) => push({ tone: 'success', message, title }),
+    [push],
+  );
+  const error = useCallback(
+    (message: string, title?: string) => push({ tone: 'error', message, title }),
+    [push],
+  );
+  const info = useCallback(
+    (message: string, title?: string) => push({ tone: 'info', message, title }),
+    [push],
+  );
+  const warning = useCallback(
+    (message: string, title?: string) => push({ tone: 'warning', message, title }),
+    [push],
+  );
+  const clear = useCallback(() => {
+    timers.current.forEach((h) => window.clearTimeout(h));
+    timers.current.clear();
+    setToasts([]);
+  }, []);
+
+  const api = useMemo<ToastApi>(
+    () => ({ push, success, error, info, warning, dismiss, clear }),
+    [push, success, error, info, warning, dismiss, clear],
+  );
 
   useEffect(() => {
     const map = timers.current;

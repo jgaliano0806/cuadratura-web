@@ -6,8 +6,13 @@ export type DayRow = {
   movil: number | null;
   inspector: string | null;
   inspector_id?: string | null;
+  nombres?: string | null;
+  apellido?: string | null;
   legajo: string | null;
   posicion_codigo: string;
+  licencia_codigo?: string | null;
+  licencia_color_fondo?: string | null;
+  licencia_color_letra?: string | null;
 };
 
 export type CoverageRow = {
@@ -45,6 +50,7 @@ export type InspectorRow = {
 };
 
 export const WEEKDAYS_SHORT = ['D', 'L', 'M', 'X', 'J', 'V', 'S'] as const;
+export const WEEKDAYS_ABBR = ['Dom', 'Lun', 'Mar', 'Mie', 'Jue', 'Vie', 'Sab'] as const;
 export const WEEKDAYS_LONG = [
   'Domingo',
   'Lunes',
@@ -102,6 +108,12 @@ export function eachDate(from: string, to: string): string[] {
   return out;
 }
 
+export function addIsoDays(value: string, n: number): string {
+  const d = new Date((value || iso(new Date())) + 'T12:00:00');
+  d.setDate(d.getDate() + n);
+  return iso(d);
+}
+
 export function monthBounds(anchor: string): { from: string; to: string } {
   const d = new Date((anchor || iso(new Date())) + 'T12:00:00');
   const from = new Date(d.getFullYear(), d.getMonth(), 1);
@@ -125,13 +137,18 @@ export function weekdayLetter(isoDate: string) {
   return WEEKDAYS_SHORT[d.getDay()];
 }
 
+export function weekdayAbbrev(isoDate: string) {
+  const d = new Date(isoDate + 'T12:00:00');
+  return WEEKDAYS_ABBR[d.getDay()];
+}
+
 export function weekdayLong(isoDate: string) {
   const d = new Date(isoDate + 'T12:00:00');
   return WEEKDAYS_LONG[d.getDay()];
 }
 
 export function rowKey(row: DayRow) {
-  return row.legajo || row.inspector || row.posicion_codigo;
+  return row.inspector_id || row.legajo || row.inspector || row.posicion_codigo;
 }
 
 export function cellTone(codigo: string, tipo: string): string {

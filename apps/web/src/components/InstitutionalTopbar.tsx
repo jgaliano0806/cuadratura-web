@@ -3,7 +3,6 @@ import { ThemeToggle } from './ThemeToggle';
 
 type Props = {
   userName?: string;
-  onSearch?: () => void;
 };
 
 function formatClock(d: Date) {
@@ -28,7 +27,7 @@ function formatDate(d: Date) {
  * Barra superior institucional (inspirada en el panel operativo):
  * marca + reloj en vivo + estado + toggle de tema.
  */
-export function InstitutionalTopbar({ userName, onSearch }: Props) {
+export function InstitutionalTopbar({ userName }: Props) {
   const [now, setNow] = useState(() => new Date());
 
   useEffect(() => {
@@ -43,10 +42,6 @@ export function InstitutionalTopbar({ userName, onSearch }: Props) {
           <strong>Cuadratura operativa</strong>
           <span>Planificación de inspectores y móviles · Caminos de las Sierras</span>
         </div>
-        <span className="live-badge" title="Sesión activa">
-          <span className="live-dot" aria-hidden />
-          EN VIVO
-        </span>
       </div>
 
       <div className="topbar-meta">
@@ -64,16 +59,8 @@ export function InstitutionalTopbar({ userName, onSearch }: Props) {
             <strong className="topbar-stat-value">{userName}</strong>
           </div>
         ) : null}
-        {onSearch ? (
-          <button
-            type="button"
-            className="btn secondary sm"
-            onClick={onSearch}
-            title="Buscar (Ctrl + K)"
-          >
-            Buscar ⌘K
-          </button>
-        ) : null}
+      </div>
+      <div className="topbar-theme">
         <ThemeToggle variant="topbar" />
       </div>
     </header>

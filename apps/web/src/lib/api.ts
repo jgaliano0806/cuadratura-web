@@ -6,6 +6,8 @@ export class ApiError extends Error {
   constructor(
     message: string,
     public status: number,
+    /** Cuerpo completo de la respuesta: algunos errores traen datos para mostrar. */
+    public body?: unknown,
   ) {
     super(message);
   }
@@ -29,14 +31,16 @@ export async function api<T>(
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
   if (!res.ok) {
     let message = res.statusText;
+    let body: unknown;
     try {
-      const body = await res.json();
-      message = body.message || body.error || message;
-      if (Array.isArray(message)) message = message.join(', ');
+      body = await res.json();
+      const b = body as { message?: unknown; error?: unknown };
+      message = String(b.message || b.error || message);
+      if (Array.isArray(b.message)) message = b.message.join(', ');
     } catch {
       /* ignore */
     }
-    throw new ApiError(String(message), res.status);
+    throw new ApiError(String(message), res.status, body);
   }
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;

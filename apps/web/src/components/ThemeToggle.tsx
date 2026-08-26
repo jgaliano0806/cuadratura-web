@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { useTheme, type ThemePreference } from '../lib/theme';
 
 type Props = {
@@ -14,10 +15,48 @@ const LABELS: Record<ThemePreference, string> = {
   system: 'Según sistema',
 };
 
-const ICONS: Record<ThemePreference, string> = {
-  light: '☀',
-  dark: '☾',
-  system: '◐',
+function SunIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden>
+      <circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" strokeWidth="2" />
+      <path
+        d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function MoonIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden>
+      <path
+        d="M21 14.3A8.5 8.5 0 1 1 9.7 3 7 7 0 0 0 21 14.3z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function SystemIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden>
+      <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="2" />
+      <path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor" />
+    </svg>
+  );
+}
+
+const ICONS: Record<ThemePreference, ReactNode> = {
+  light: <SunIcon />,
+  dark: <MoonIcon />,
+  system: <SystemIcon />,
 };
 
 export function ThemeToggle({
@@ -37,22 +76,32 @@ export function ThemeToggle({
     setPreference(next);
   }
 
-  const shown = cycleSystem ? preference : theme;
-  const label = LABELS[shown];
-  const icon = ICONS[shown];
+  const shown: ThemePreference = cycleSystem
+    ? preference
+    : theme === 'light'
+      ? 'dark'
+      : 'light';
+  const label = cycleSystem
+    ? LABELS[preference]
+    : theme === 'light'
+      ? 'Cambiar a modo nocturno'
+      : 'Cambiar a modo claro';
+  const iconOnly = variant === 'topbar' || collapsed;
 
   return (
     <button
       type="button"
       className={`theme-toggle theme-toggle-${variant}`}
       onClick={onClick}
-      aria-label={`Cambiar tema. Actual: ${label}`}
-      title={`${label} — click para cambiar`}
+      aria-label={cycleSystem ? `Cambiar tema. Actual: ${LABELS[preference]}` : label}
+      title={label}
     >
       <span className="theme-icon" aria-hidden>
-        {icon}
+        {ICONS[shown]}
       </span>
-      {!collapsed ? <span className="theme-label">{label}</span> : null}
+      {!iconOnly ? (
+        <span className="theme-label">{LABELS[cycleSystem ? preference : theme]}</span>
+      ) : null}
     </button>
   );
 }

@@ -103,3 +103,27 @@ export function firstIssueFor(
 ) {
   return issues.find((i) => i.field === field)?.message ?? '';
 }
+
+const DMY = /^(\d{1,2})[/\-. ](\d{1,2})[/\-. ](\d{2,4})$/;
+
+/** YYYY-MM-DD → dd/mm/aaaa. */
+export function isoToDmy(value: string): string {
+  if (!isIsoDate(value)) return '';
+  const [y, m, d] = value.split('-');
+  return `${d}/${m}/${y}`;
+}
+
+/** dd/mm/aaaa (también ISO o d-m-aa) → YYYY-MM-DD, o null. */
+export function parseDmy(value: string): string | null {
+  const t = value.trim();
+  if (!t) return null;
+  if (isIsoDate(t)) return t;
+  const m = t.match(DMY);
+  if (!m) return null;
+  const dd = m[1].padStart(2, '0');
+  const mm = m[2].padStart(2, '0');
+  let yy = m[3];
+  if (yy.length === 2) yy = Number(yy) >= 70 ? `19${yy}` : `20${yy}`;
+  const iso = `${yy}-${mm}-${dd}`;
+  return isIsoDate(iso) ? iso : null;
+}

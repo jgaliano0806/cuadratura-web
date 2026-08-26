@@ -81,6 +81,24 @@ export const Icons = {
       <path d="M5 19.5c.8-3.2 3.2-5 7-5s6.2 1.8 7 5" />
     </Svg>
   ),
+  chevron: (p: IconProps) => (
+    <Svg {...p}>
+      <path d="M8 10l4 4 4-4" />
+    </Svg>
+  ),
+  shield: (p: IconProps) => (
+    <Svg {...p}>
+      <path d="M12 3.5 5.5 6.2v5.3c0 4.1 2.6 7.2 6.5 8.5 3.9-1.3 6.5-4.4 6.5-8.5V6.2L12 3.5Z" />
+      <path d="M9.2 12.1 11.1 14l3.7-4" />
+    </Svg>
+  ),
+  radio: (p: IconProps) => (
+    <Svg {...p}>
+      <rect x="4" y="8" width="16" height="11" rx="2" />
+      <path d="M7 8V5.5M8.5 13.5h7M8.5 16h4" />
+      <circle cx="16.2" cy="13.6" r="1.1" />
+    </Svg>
+  ),
   search: (p: IconProps) => (
     <Svg {...p}>
       <circle cx="11" cy="11" r="6" />

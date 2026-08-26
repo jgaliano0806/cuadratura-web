@@ -1,6 +1,12 @@
 import { useMemo } from 'react';
 import { buildPresets, matchPreset, type Preset } from '../../lib/datePresets';
 
+const SHORT: Partial<Record<Preset['id'], string>> = {
+  'this-week': 'Semana',
+  'this-month': 'Mes',
+  'next-month': 'Próx.',
+};
+
 type Props = {
   from: string;
   to: string;
@@ -8,9 +14,17 @@ type Props = {
   /** Filtrado opcional de presets por id. */
   include?: Array<Preset['id']>;
   reference?: Date;
+  compact?: boolean;
 };
 
-export function DateRangePresets({ from, to, onApply, include, reference }: Props) {
+export function DateRangePresets({
+  from,
+  to,
+  onApply,
+  include,
+  reference,
+  compact,
+}: Props) {
   const presets = useMemo(() => {
     const all = buildPresets(reference);
     if (!include) return all;
@@ -21,7 +35,11 @@ export function DateRangePresets({ from, to, onApply, include, reference }: Prop
   const active = useMemo(() => matchPreset(from, to, presets), [from, to, presets]);
 
   return (
-    <div className="date-presets" role="group" aria-label="Rangos rápidos">
+    <div
+      className={`date-presets${compact ? ' is-compact' : ''}`}
+      role="group"
+      aria-label="Rangos rápidos"
+    >
       {presets.map((p) => (
         <button
           key={p.id}
@@ -32,7 +50,7 @@ export function DateRangePresets({ from, to, onApply, include, reference }: Prop
             onApply(r.from, r.to);
           }}
         >
-          {p.label}
+          {compact ? (SHORT[p.id] ?? p.label) : p.label}
         </button>
       ))}
     </div>
