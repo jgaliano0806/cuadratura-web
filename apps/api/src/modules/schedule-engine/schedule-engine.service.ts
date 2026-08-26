@@ -3,6 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import type { PoolClient } from 'pg';
 import { DatabaseService } from '../../database/database.service';
 import {
   applyOperationalExceptions,
@@ -12,10 +13,149 @@ import {
   type ProjectionInput,
   type ShiftCode,
 } from './projection';
+import { FRANJA, resolverSuperposiciones } from './desdoble';
+import {
+  calcularOcupacion,
+  resumenPorDia,
+  resumenPorMovil,
+  slotsConProblema,
+} from './ocupacion';
+
+type CronogramaContiguo = {
+  id: string;
+  codigo: string;
+  version_id: string;
+  numero_version: number;
+  estado: string;
+};
+
+async function lookupContiguo(
+  client: PoolClient,
+  capa: 'PLANIFICADA' | 'REAL',
+  dateFrom: string,
+  dateTo: string,
+): Promise<CronogramaContiguo | null> {
+  const found = await client.query<CronogramaContiguo>(
+    `SELECT c.id, c.codigo,
+            v.id AS version_id,
+            v.numero_version,
+            v.estado::text AS estado
+     FROM seguridad_vial.cronograma c
+     JOIN seguridad_vial.cronograma_version v
+       ON v.id = COALESCE(
+            c.version_actual_id,
+            (SELECT v2.id FROM seguridad_vial.cronograma_version v2
+             WHERE v2.cronograma_id = c.id
+             ORDER BY v2.numero_version DESC
+             LIMIT 1)
+          )
+     WHERE c.capa = $3::seguridad_vial.tipo_capa
+       AND c.periodo_hasta >= ($1::date - 1)
+       AND c.periodo_desde <= ($2::date + 1)
+     ORDER BY c.periodo_hasta DESC, v.creada_en DESC
+     LIMIT 1`,
+    [dateFrom, dateTo, capa],
+  );
+  return found.rows[0] ?? null;
+}
 
 @Injectable()
 export class ScheduleEngineService {
   constructor(private readonly db: DatabaseService) {}
+
+  /**
+   * Ocupación de cada móvil, turno y día del rango.
+   *
+   * Por defecto informa la cuadratura ya desdoblada, que es la que se va a
+   * operar. Con `sinDesdoblar` se ve el reparto crudo, útil para comparar
+   * cuánto cambió el desdoble.
+   */
+  async ocupacion(
+    dateFrom: string,
+    dateTo: string,
+    opciones: { sinDesdoblar?: boolean; permitirMovil4?: boolean } = {},
+  ) {
+    this.assertRange(dateFrom, dateTo);
+    const inputs = await this.loadProjectionInputs();
+    const days: ProjectedDay[] = [];
+    for (const input of inputs) {
+      days.push(...projectRange(input, dateFrom, dateTo));
+    }
+
+    const desdoblar = !opciones.sinDesdoblar;
+    const { days: efectivos, desdobles } = desdoblar
+      ? resolverSuperposiciones(days, {
+          permitirMovil4: opciones.permitirMovil4 ?? false,
+        })
+      : { days, desdobles: [] };
+
+    const slots = calcularOcupacion(efectivos);
+    const problemas = slotsConProblema(slots);
+
+    return {
+      date_from: dateFrom,
+      date_to: dateTo,
+      desdoblada: desdoblar,
+      slots,
+      por_dia: resumenPorDia(efectivos),
+      por_movil: resumenPorMovil(slots),
+      problemas,
+      totales: {
+        slots: slots.length,
+        huecos: problemas.filter((s) => s.estado === 'HUECO').length,
+        cubiertas: slots.filter((s) => s.estado === 'CUBIERTA').length,
+        dobles: slots.filter((s) => s.estado === 'DOBLE').length,
+        superpuestas: problemas.filter((s) => s.estado === 'SUPERPUESTA').length,
+        desdobles_aplicados: desdobles.filter((d) => d.estado === 'RESUELTO')
+          .length,
+      },
+      referencia:
+        'HUECO = nadie cubre el móvil · CUBIERTA = un inspector (lo buscado) · ' +
+        'DOBLE = dos, reparto normal · SUPERPUESTA = tres o más, requiere desdoble.',
+    };
+  }
+
+  /**
+   * Detecta superposiciones de 3 inspectores en un mismo móvil/turno/día y las
+   * resuelve moviendo a uno al móvil que comparte su horario de entrada.
+   *
+   * Es una simulación: devuelve qué movimientos harían falta y por qué, sin
+   * escribir nada. Los movimientos se registran después como asignaciones
+   * operativas, así la cuadratura base queda intacta.
+   */
+  async previewDesdobles(
+    dateFrom: string,
+    dateTo: string,
+    permitirMovil4 = false,
+  ) {
+    this.assertRange(dateFrom, dateTo);
+    const inputs = await this.loadProjectionInputs();
+    const days: ProjectedDay[] = [];
+    for (const input of inputs) {
+      days.push(...projectRange(input, dateFrom, dateTo));
+    }
+
+    const { desdobles } = resolverSuperposiciones(days, { permitirMovil4 });
+    const sinResolver = desdobles.filter((d) => d.estado === 'SIN_DESTINO');
+
+    return {
+      date_from: dateFrom,
+      date_to: dateTo,
+      total: desdobles.length,
+      resueltos: desdobles.length - sinResolver.length,
+      sin_destino: sinResolver.length,
+      permitir_movil4: permitirMovil4,
+      desdobles,
+      regla:
+        'Con 3 inspectores en un mismo móvil se mueve a uno al móvil que comparte ' +
+        'el horario de entrada (1↔2, 3↔5), conservando el turno. Dos en un móvil ' +
+        'es reparto normal y no se toca.',
+      criterio:
+        'Se mueve al que menos veces fue desdoblado; si empatan, al que hace más ' +
+        'tiempo que no le toca; si siguen empatados, por puntero rotativo. No ' +
+        'interviene la antigüedad ni el legajo.',
+    };
+  }
 
   async preview(dateFrom: string, dateTo: string) {
     this.assertRange(dateFrom, dateTo);
@@ -51,7 +191,7 @@ export class ScheduleEngineService {
     const inputs = await this.loadProjectionInputs();
     if (!inputs.length) {
       throw new BadRequestException(
-        'No hay estados iniciales en estado_inicial_posicion. Ejecutá el seed operativo (scripts/seed-catalogos.mjs) antes de proyectar.',
+        'No hay inspectores activos con secuencia. Cargalos en Administración → Inspectores y volvé a generar el ciclo.',
       );
     }
 
@@ -79,6 +219,57 @@ export class ScheduleEngineService {
     }
     // Sin applyOperationalExceptions: PLAN queda limpia.
 
+    // Desdoble obligatorio antes de materializar: `cobertura_dia` acepta como
+    // máximo 2 inspectores por móvil/turno/día (ck_cobertura_estado), así que un
+    // triple hace fallar el INSERT. Se mueve a uno al móvil que comparte el
+    // horario de entrada, conservando el turno y sin tocar la cuadratura base.
+    const { days: resolvedDays, desdobles } = resolverSuperposiciones(allDays, {
+      cualquierMovilDelTurno: true,
+    });
+    allDays.length = 0;
+    allDays.push(...resolvedDays);
+
+    const sinDestino = desdobles.filter((d) => d.estado === 'SIN_DESTINO');
+    if (sinDestino.length) {
+      const TURNO_TEXTO: Record<string, string> = {
+        M: 'mañana',
+        T: 'tarde',
+        N: 'noche',
+      };
+      const HORA_ENTRADA: Record<string, Record<string, string>> = {
+        M: { TEMPRANA: '05:00', TARDIA: '07:00' },
+        T: { TEMPRANA: '13:00', TARDIA: '15:00' },
+        N: { TEMPRANA: '21:00', TARDIA: '23:00' },
+      };
+
+      // Se devuelve la lista completa para que la pantalla la muestre y el
+      // usuario resuelva caso por caso. No se mueve a nadie fuera de su franja
+      // horaria: eso le cambiaría la hora de entrada.
+      const casos = sinDestino.map((d) => {
+        const franja = FRANJA[d.movilOrigen];
+        return {
+          fecha: d.date,
+          turno: d.turno,
+          turno_texto: TURNO_TEXTO[d.turno] ?? d.turno,
+          movil: d.movilOrigen,
+          hora_entrada: HORA_ENTRADA[d.turno]?.[franja] ?? null,
+          inspectores: d.inspectores,
+          motivo: d.motivo,
+        };
+      });
+
+      throw new BadRequestException({
+        statusCode: 400,
+        error: 'DESDOBLE_SIN_DESTINO',
+        message:
+          `Hay ${sinDestino.length} caso(s) donde tres inspectores coinciden en el ` +
+          `mismo móvil y turno, y los otros móviles con el mismo horario de ` +
+          `entrada ya están completos. No se movió a nadie: hacerlo le cambiaría ` +
+          `la hora de entrada. Resolvelos a mano y volvé a generar.`,
+        casos_a_resolver: casos,
+      });
+    }
+
     const mobiles = await this.db.query<{ id: string; numero: number }>(
       `SELECT id, numero FROM seguridad_vial.movil WHERE estado = 'ACTIVO'`,
     );
@@ -90,19 +281,30 @@ export class ScheduleEngineService {
       async (client) => {
         await client.query(`SELECT set_config('app.materializing', 'on', true)`);
 
-        const codigo = `PLAN-${dateFrom.replace(/-/g, '')}-${dateTo.replace(/-/g, '')}`;
+        let codigo = `PLAN-${dateFrom.replace(/-/g, '')}-${dateTo.replace(/-/g, '')}`;
         let cronogramaId: string;
         let versionId: string;
         let numero: number;
         let reused = false;
+        let wipe = false;
 
         const existing = await client.query<{ id: string }>(
           `SELECT id FROM seguridad_vial.cronograma WHERE codigo = $1`,
           [codigo],
         );
+        const contiguo = existing.rows[0]
+          ? null
+          : await lookupContiguo(client, 'PLANIFICADA', dateFrom, dateTo);
 
-        if (existing.rows[0]) {
-          cronogramaId = existing.rows[0].id;
+        if (existing.rows[0] || contiguo) {
+          if (contiguo?.estado === 'EN_REVISION') {
+            throw new BadRequestException(
+              'Ya hay una versión PLANIFICADA en revisión. Devolvéla a borrador antes de regenerar.',
+            );
+          }
+          cronogramaId = existing.rows[0]?.id ?? contiguo!.id;
+          if (contiguo) codigo = contiguo.codigo;
+          wipe = Boolean(existing.rows[0]);
           await client.query(
             `UPDATE seguridad_vial.cronograma
              SET periodo_desde = least(periodo_desde, $2::date),
@@ -152,21 +354,27 @@ export class ScheduleEngineService {
               );
             }
 
-            await client.query(
-              `DELETE FROM seguridad_vial.cobertura_dia WHERE version_id = $1`,
-              [versionId],
-            );
-            await client.query(
-              `DELETE FROM seguridad_vial.dia_cronograma WHERE version_id = $1`,
-              [versionId],
-            );
-            await client.query(
-              `UPDATE seguridad_vial.cronograma_version
-               SET motivo_cambio = 'Regeneración por motor de reglas 5×3',
-                   derivada_de_version_id = $2
-               WHERE id = $1`,
-              [versionId, baseVersionId],
-            );
+            if (wipe) {
+              await client.query(
+                `DELETE FROM seguridad_vial.cobertura_dia WHERE version_id = $1`,
+                [versionId],
+              );
+              await client.query(
+                `DELETE FROM seguridad_vial.dia_cronograma WHERE version_id = $1`,
+                [versionId],
+              );
+              await client.query(
+                `UPDATE seguridad_vial.cronograma_version
+                 SET motivo_cambio = 'Regeneración por motor de reglas 5×3',
+                     derivada_de_version_id = $2
+                 WHERE id = $1`,
+                [versionId, baseVersionId],
+              );
+            }
+          } else if (contiguo) {
+            versionId = contiguo.version_id;
+            numero = Number(contiguo.numero_version);
+            reused = true;
           } else {
             const ver = await client.query<{ n: number }>(
               `SELECT coalesce(max(numero_version), 0)::int AS n
@@ -228,7 +436,13 @@ export class ScheduleEngineService {
            FROM seguridad_vial.dia_cronograma d
            WHERE d.version_id = $2
              AND d.fecha_operativa >= $3
-             AND d.fecha_operativa <= $4`,
+             AND d.fecha_operativa <= $4
+             AND NOT EXISTS (
+               SELECT 1 FROM seguridad_vial.dia_cronograma x
+               WHERE x.version_id = $1
+                 AND x.posicion_id = d.posicion_id
+                 AND x.fecha_operativa = d.fecha_operativa
+             )`,
           [versionId, baseVersionId, dateFrom, dateTo],
         );
 
@@ -240,6 +454,7 @@ export class ScheduleEngineService {
             [versionId, day.positionId, day.date],
           );
           if (exists.rowCount) continue;
+          if (!day.inspectorId) continue;
 
           const movilId =
             day.mobile !== null ? (mobileByNumber.get(day.mobile) ?? null) : null;
@@ -386,19 +601,25 @@ export class ScheduleEngineService {
         await client.query(`SELECT set_config('app.materializing', 'on', true)`);
         await client.query(`SELECT set_config('app.real_from_plan_draft', 'on', true)`);
 
-        const codigo = `REAL-${dateFrom.replace(/-/g, '')}-${dateTo.replace(/-/g, '')}`;
+        let codigo = `REAL-${dateFrom.replace(/-/g, '')}-${dateTo.replace(/-/g, '')}`;
         let cronogramaId: string;
         let versionId: string;
         let numero: number;
         let reused = false;
+        let wipe = false;
 
         const existing = await client.query<{ id: string }>(
           `SELECT id FROM seguridad_vial.cronograma WHERE codigo = $1`,
           [codigo],
         );
+        const contiguo = existing.rows[0]
+          ? null
+          : await lookupContiguo(client, 'REAL', dateFrom, dateTo);
 
-        if (existing.rows[0]) {
-          cronogramaId = existing.rows[0].id;
+        if (existing.rows[0] || contiguo) {
+          cronogramaId = existing.rows[0]?.id ?? contiguo!.id;
+          if (contiguo) codigo = contiguo.codigo;
+          wipe = Boolean(existing.rows[0]);
           await client.query(
             `UPDATE seguridad_vial.cronograma
              SET periodo_desde = least(periodo_desde, $2::date),
@@ -433,21 +654,27 @@ export class ScheduleEngineService {
                 [versionId],
               );
             }
-            await client.query(
-              `DELETE FROM seguridad_vial.cobertura_dia WHERE version_id = $1`,
-              [versionId],
-            );
-            await client.query(
-              `DELETE FROM seguridad_vial.dia_cronograma WHERE version_id = $1`,
-              [versionId],
-            );
-            await client.query(
-              `UPDATE seguridad_vial.cronograma_version
-               SET derivada_de_version_id = $2,
-                   motivo_cambio = 'Regeneración REAL con overlays operativos'
-               WHERE id = $1`,
-              [versionId, planVersionId],
-            );
+            if (wipe) {
+              await client.query(
+                `DELETE FROM seguridad_vial.cobertura_dia WHERE version_id = $1`,
+                [versionId],
+              );
+              await client.query(
+                `DELETE FROM seguridad_vial.dia_cronograma WHERE version_id = $1`,
+                [versionId],
+              );
+              await client.query(
+                `UPDATE seguridad_vial.cronograma_version
+                 SET derivada_de_version_id = $2,
+                     motivo_cambio = 'Regeneración REAL con overlays operativos'
+                 WHERE id = $1`,
+                [versionId, planVersionId],
+              );
+            }
+          } else if (contiguo) {
+            versionId = contiguo.version_id;
+            numero = Number(contiguo.numero_version);
+            reused = true;
           } else {
             const ver = await client.query<{ n: number }>(
               `SELECT coalesce(max(numero_version), 0)::int AS n
@@ -509,7 +736,13 @@ export class ScheduleEngineService {
            FROM seguridad_vial.dia_cronograma d
            WHERE d.version_id = $2
              AND d.fecha_operativa >= $3::date
-             AND d.fecha_operativa <= $4::date`,
+             AND d.fecha_operativa <= $4::date
+             AND NOT EXISTS (
+               SELECT 1 FROM seguridad_vial.dia_cronograma x
+               WHERE x.version_id = $1
+                 AND x.posicion_id = d.posicion_id
+                 AND x.fecha_operativa = d.fecha_operativa
+             )`,
           [versionId, planVersionId, dateFrom, dateTo],
         );
 
@@ -910,6 +1143,7 @@ export class ScheduleEngineService {
     kind: 'VACACION' | 'LICENCIA' | 'FERIADO' | 'ENFERMEDAD';
     userId: string;
     reason?: string;
+    catalogoLicenciaId?: string;
     rematerialize?: boolean;
   }) {
     const {
@@ -922,14 +1156,37 @@ export class ScheduleEngineService {
     } = input;
     this.assertRange(dateFrom, dateTo);
 
+    let catalogoLicenciaId: string | null = null;
+    let licenciaNombre = '';
+    if (kind === 'LICENCIA') {
+      if (!input.catalogoLicenciaId) {
+        throw new BadRequestException(
+          'Elegí un tipo de licencia de Administración → Licencias',
+        );
+      }
+      const lic = await this.db.query<{ id: string; nombre: string }>(
+        `SELECT id, nombre FROM seguridad_vial.catalogo_licencia
+         WHERE id = $1 AND activo = true`,
+        [input.catalogoLicenciaId],
+      );
+      if (!lic.rows[0]) {
+        throw new BadRequestException('Ese tipo de licencia no existe o está inactivo');
+      }
+      catalogoLicenciaId = lic.rows[0].id;
+      licenciaNombre = lic.rows[0].nombre;
+    }
+
     const tipoDia =
       kind === 'FERIADO' ? 'FRANCO' : kind === 'VACACION' ? 'VACACION' : kind;
     const motivo =
       (input.reason || '').trim() ||
-      `${kind} operativa ${dateFrom}→${dateTo}`;
+      (licenciaNombre
+        ? `${licenciaNombre} ${dateFrom}→${dateTo}`
+        : `${kind} operativa ${dateFrom}→${dateTo}`);
 
     const exists = await this.db.query(
-      `SELECT 1 FROM seguridad_vial.inspector WHERE id = $1 AND estado = 'ACTIVO'`,
+      `SELECT 1 FROM seguridad_vial.inspector
+       WHERE id = $1 AND estado = 'ACTIVO' AND tipo_plantel <> 'PEAJISTA'`,
       [inspectorId],
     );
     if (!exists.rows[0]) {
@@ -950,12 +1207,12 @@ export class ScheduleEngineService {
     const ins = await this.db.query<{ id: string }>(
       `INSERT INTO seguridad_vial.asignacion_operativa(
          inspector_id, tipo, fecha_desde, fecha_hasta,
-         tipo_dia, motivo, creada_por
+         tipo_dia, motivo, creada_por, catalogo_licencia_id
        ) VALUES (
          $1, 'LICENCIA', $2::date, $3::date,
-         $4::seguridad_vial.tipo_dia, $5, $6
+         $4::seguridad_vial.tipo_dia, $5, $6, $7
        ) RETURNING id`,
-      [inspectorId, dateFrom, dateTo, tipoDia, motivo, userId],
+      [inspectorId, dateFrom, dateTo, tipoDia, motivo, userId, catalogoLicenciaId],
     );
 
     let real: unknown = null;
@@ -967,6 +1224,115 @@ export class ScheduleEngineService {
       registered: true,
       kind,
       tipo_dia: tipoDia,
+      date_from: dateFrom,
+      date_to: dateTo,
+      asignacion_id: ins.rows[0].id,
+      plan_preserved: true,
+      real,
+    };
+  }
+
+  /**
+   * Cambio de turno y/o móvil por un rango de fechas (overlay REAL).
+   *
+   * Se puede mandar solo el turno, solo el móvil, o los dos. Lo que no venga se
+   * conserva de la cuadratura base. Como toda asignación operativa, no avanza ni
+   * recalcula la secuencia: al terminar el rango el inspector vuelve a su plan.
+   */
+  async registerOperationalAssignment(input: {
+    inspectorId: string;
+    dateFrom: string;
+    dateTo: string;
+    shift?: 'M' | 'T' | 'N' | null;
+    mobile?: number | null;
+    userId: string;
+    reason?: string;
+    rematerialize?: boolean;
+  }) {
+    const {
+      inspectorId,
+      dateFrom,
+      dateTo,
+      shift = null,
+      mobile = null,
+      userId,
+      rematerialize = true,
+    } = input;
+    this.assertRange(dateFrom, dateTo);
+
+    if (!shift && mobile === null) {
+      throw new BadRequestException(
+        'Indicá al menos un turno o un móvil para el cambio.',
+      );
+    }
+
+    const inspector = await this.db.query(
+      `SELECT 1 FROM seguridad_vial.inspector
+       WHERE id = $1 AND estado = 'ACTIVO' AND tipo_plantel <> 'PEAJISTA'`,
+      [inspectorId],
+    );
+    if (!inspector.rows[0]) {
+      throw new NotFoundException('Inspector no encontrado o inactivo');
+    }
+
+    let movilId: string | null = null;
+    if (mobile !== null) {
+      const m = await this.db.query<{ id: string }>(
+        `SELECT id FROM seguridad_vial.movil
+         WHERE numero = $1 AND estado = 'ACTIVO'`,
+        [mobile],
+      );
+      if (!m.rows[0]) {
+        throw new NotFoundException(`El móvil ${mobile} no existe o está inactivo`);
+      }
+      movilId = m.rows[0].id;
+    }
+
+    const tipo = shift && mobile !== null
+      ? 'COBERTURA'
+      : shift
+        ? 'CAMBIO_TURNO'
+        : 'CAMBIO_MOVIL';
+
+    const destino = [shift, mobile !== null ? `móvil ${mobile}` : null]
+      .filter(Boolean)
+      .join(' · ');
+    const motivo =
+      (input.reason || '').trim() || `Cambio operativo a ${destino} ${dateFrom}→${dateTo}`;
+
+    // Un solo cambio vigente por inspector y rango: el nuevo reemplaza al anterior.
+    await this.db.query(
+      `UPDATE seguridad_vial.asignacion_operativa
+       SET estado = 'ANULADA'
+       WHERE tipo IN ('CAMBIO_MOVIL', 'CAMBIO_TURNO', 'COBERTURA')
+         AND estado = 'ACTIVA'
+         AND inspector_id = $1
+         AND fecha_desde <= $3::date
+         AND (fecha_hasta IS NULL OR fecha_hasta >= $2::date)`,
+      [inspectorId, dateFrom, dateTo],
+    );
+
+    const ins = await this.db.query<{ id: string }>(
+      `INSERT INTO seguridad_vial.asignacion_operativa(
+         inspector_id, tipo, fecha_desde, fecha_hasta,
+         turno, movil_id, motivo, creada_por
+       ) VALUES (
+         $1, $2, $3::date, $4::date,
+         $5::seguridad_vial.turno_codigo, $6, $7, $8
+       ) RETURNING id`,
+      [inspectorId, tipo, dateFrom, dateTo, shift, movilId, motivo, userId],
+    );
+
+    let real: unknown = null;
+    if (rematerialize) {
+      real = await this.applyReal(dateFrom, dateTo, userId);
+    }
+
+    return {
+      registered: true,
+      tipo,
+      shift,
+      mobile,
       date_from: dateFrom,
       date_to: dateTo,
       asignacion_id: ins.rows[0].id,
@@ -1047,7 +1413,8 @@ export class ScheduleEngineService {
                   (SELECT array_agg(m.numero::int ORDER BY pm.orden)
                    FROM seguridad_vial.perfil_rotacion_movil pm
                    JOIN seguridad_vial.movil m ON m.id = pm.movil_id
-                   WHERE pm.perfil_id = pr.id),
+                   WHERE pm.perfil_id = pr.id
+                     AND m.estado = 'ACTIVO'),
                   ARRAY[]::int[]
                 ) AS moviles
          FROM seguridad_vial.perfil_rotacion pr
@@ -1058,6 +1425,8 @@ export class ScheduleEngineService {
          FROM seguridad_vial.asignacion_inspector_posicion a
          JOIN seguridad_vial.inspector i ON i.id = a.inspector_id
          WHERE current_date <@ a.vigencia
+           AND i.estado = 'ACTIVO'
+           AND i.tipo_plantel <> 'PEAJISTA'
          ORDER BY a.posicion_id, a.fecha_desde DESC
        )
        SELECT p.id AS posicion_id,
@@ -1076,8 +1445,9 @@ export class ScheduleEngineService {
        FROM seguridad_vial.estado_inicial_posicion e
        JOIN seguridad_vial.posicion_cuadratura p ON p.id = e.posicion_id
        JOIN perfiles pf ON pf.perfil_id = p.perfil_rotacion_id
-       LEFT JOIN seguridad_vial.movil m ON m.id = e.movil_id
-       LEFT JOIN ocupante o ON o.posicion_id = p.id
+       LEFT JOIN seguridad_vial.movil m
+         ON m.id = e.movil_id AND m.estado = 'ACTIVO'
+       JOIN ocupante o ON o.posicion_id = p.id
        WHERE p.estado = 'ACTIVO'
        ORDER BY p.codigo`,
     );
@@ -1107,49 +1477,52 @@ export class ScheduleEngineService {
       blocksByPos.set(b.posicion_id, list);
     }
 
-    return result.rows.map((row) => {
+    return result.rows.flatMap((row) => {
+      if (!row.inspector_id) return [];
       const shifts = (row.turnos || []).filter(Boolean) as ShiftCode[];
-      const mobiles = (row.moviles || []).map(Number).filter((n) => n > 0);
+      const mobileList = (row.moviles || []).map(Number).filter((n) => n > 0);
+      if (!mobileList.length) return [];
       const shiftList = shifts.length
         ? shifts
         : (['M', 'N', 'T'] as ShiftCode[]);
-      const mobileList = mobiles.length ? mobiles : [1, 5, 3, 2];
       const ref = row.fecha_referencia.slice(0, 10);
       const posBlocks = blocksByPos.get(row.posicion_id) ?? [];
 
       let mobile =
         row.movil !== null ? Number(row.movil) : lastWorkMobile(posBlocks, ref);
       let shift = (row.turno as ShiftCode | null) ?? lastWorkShift(posBlocks, ref);
+      if (mobile !== null && !mobileList.includes(mobile)) {
+        mobile = mobileList[0];
+      }
       let shiftIndex =
         row.indice_turno ??
         (shift ? Math.max(0, shiftList.indexOf(shift)) : 0);
       let mobileIndex =
-        row.indice_movil ??
-        (mobile !== null ? Math.max(0, mobileList.indexOf(mobile)) : 0);
+        mobile !== null ? Math.max(0, mobileList.indexOf(mobile)) : 0;
       if (shiftIndex < 0) shiftIndex = 0;
       if (mobileIndex < 0) mobileIndex = 0;
 
-      // Preferir el valor persistido en estado_inicial_posicion (regla actual
-      // sin BASE). Fallback: contar bloques históricos si existen.
       const completed =
         row.bloques_completados_movil ??
         countCompletedSameMobileBlocks(posBlocks, ref, mobile);
 
-      return {
-        positionCode: row.posicion_codigo,
-        positionId: row.posicion_id,
-        inspectorId: row.inspector_id,
-        inspectorName: row.inspector_nombre,
-        referenceDate: ref,
-        cyclePosition: Number(row.posicion_ciclo),
-        shift,
-        mobile,
-        shiftIndex,
-        mobileIndex,
-        shifts: shiftList,
-        mobiles: mobileList,
-        completedBlocksOnMobile: completed,
-      };
+      return [
+        {
+          positionCode: row.posicion_codigo,
+          positionId: row.posicion_id,
+          inspectorId: row.inspector_id,
+          inspectorName: row.inspector_nombre,
+          referenceDate: ref,
+          cyclePosition: Number(row.posicion_ciclo),
+          shift,
+          mobile,
+          shiftIndex,
+          mobileIndex,
+          shifts: shiftList,
+          mobiles: mobileList,
+          completedBlocksOnMobile: completed,
+        },
+      ];
     });
   }
 

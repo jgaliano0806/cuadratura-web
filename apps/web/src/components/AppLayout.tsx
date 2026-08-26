@@ -1,25 +1,15 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-  type ReactNode,
-} from 'react';
-import { NavLink, Outlet, Navigate } from 'react-router-dom';
+import { useMemo, type ReactNode } from 'react';
+import { NavLink, Outlet, Navigate, useLocation } from 'react-router-dom';
 import { ROLE_CODES } from '@plataforma/shared';
 import { useAuth } from '../lib/auth';
-import { api } from '../lib/api';
 import { useLocalStorage } from '../lib/useLocalStorage';
 import { BrandMark } from './BrandMark';
-import { CommandPalette } from './CommandPalette';
 import { InstitutionalTopbar } from './InstitutionalTopbar';
 import { Icons } from './NavIcons';
 
-type Overview = { huecos_pendientes: number };
-type VersionRow = { id: string; estado: string };
-
-const REFRESH_MS = 60_000;
 const SIDEBAR_KEY = 'sv_sidebar_collapsed_v1';
+const TREE_KEY = 'sv_nav_tree_v1';
+const TREE_OPEN_DEFAULT: Record<string, boolean> = { cuadratura: true };
 
 const ROLE_LABEL: Record<string, string> = {
   ADMINISTRACION_SEGURIDAD_VIAL: 'Admin SV',
@@ -40,56 +30,125 @@ function initials(name: string) {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
-function CountBadge({ n, tone }: { n: number; tone: 'warn' | 'danger' }) {
-  if (!n) return null;
-  return (
-    <span
-      className={`nav-count${tone === 'warn' ? ' warn' : ' danger'}`}
-      aria-label={`${n} pendientes`}
-    >
-      {n > 99 ? '99+' : n}
-    </span>
-  );
-}
-
-type NavDef = {
-  to: string;
-  end?: boolean;
+type NavLeaf = {
+  to?: string;
   label: string;
   icon: (p: { size?: number }) => ReactNode;
-  badge?: ReactNode;
-  show?: boolean;
+  soon?: boolean;
+};
+
+type NavBranch = {
+  id: string;
+  label: string;
+  icon: (p: { size?: number }) => ReactNode;
+  children: NavLeaf[];
 };
 
 function NavItem({
   item,
   collapsed,
+  nested,
 }: {
-  item: NavDef;
+  item: NavLeaf & { to: string };
   collapsed: boolean;
+  nested?: boolean;
 }) {
   return (
     <NavLink
       to={item.to}
-      end={item.end}
-      className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
+      className={({ isActive }) =>
+        `nav-link${nested ? ' nested' : ''}${isActive ? ' active' : ''}`
+      }
       title={collapsed ? item.label : undefined}
     >
       <span className="nav-link-main">
-        <span className="nav-icon">{item.icon({ size: 18 })}</span>
+        <span className="nav-icon">{item.icon({ size: nested ? 16 : 18 })}</span>
         <span className="nav-label">{item.label}</span>
       </span>
-      {item.badge}
     </NavLink>
+  );
+}
+
+function SoonItem({
+  item,
+  collapsed,
+}: {
+  item: NavLeaf;
+  collapsed: boolean;
+}) {
+  return (
+    <span
+      className="nav-link nested soon"
+      title={collapsed ? `${item.label} · próximamente` : item.label}
+    >
+      <span className="nav-link-main">
+        <span className="nav-icon">{item.icon({ size: 16 })}</span>
+        <span className="nav-label">{item.label}</span>
+      </span>
+    </span>
+  );
+}
+
+function NavTree({
+  branch,
+  collapsed,
+  open,
+  onToggle,
+}: {
+  branch: NavBranch;
+  collapsed: boolean;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const location = useLocation();
+  const childActive = branch.children.some(
+    (c) => c.to && location.pathname.startsWith(c.to),
+  );
+  const expanded = open || childActive;
+
+  return (
+    <div className={`nav-tree${expanded ? ' open' : ''}${childActive ? ' has-active' : ''}`}>
+      <button
+        type="button"
+        className="nav-tree-parent"
+        onClick={onToggle}
+        aria-expanded={expanded}
+        title={collapsed ? branch.label : undefined}
+      >
+        <span className="nav-link-main">
+          <span className="nav-icon">{branch.icon({ size: 18 })}</span>
+          <span className="nav-label">{branch.label}</span>
+        </span>
+        {!collapsed ? (
+          <span className={`nav-caret${expanded ? ' open' : ''}`}>
+            <Icons.chevron size={14} />
+          </span>
+        ) : null}
+      </button>
+      {expanded ? (
+        <div className="nav-tree-children" role="group" aria-label={branch.label}>
+          {branch.children.map((child) =>
+            child.soon || !child.to ? (
+              <SoonItem key={child.label} item={child} collapsed={collapsed} />
+            ) : (
+              <NavItem
+                key={child.to}
+                item={{ ...child, to: child.to }}
+                collapsed={collapsed}
+                nested
+              />
+            ),
+          )}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
 export function AppLayout() {
   const { user, loading, logout, hasRole } = useAuth();
-  const [gapsCount, setGapsCount] = useState(0);
-  const [reviewCount, setReviewCount] = useState(0);
   const [collapsed, setCollapsed] = useLocalStorage(SIDEBAR_KEY, false);
-  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [treeOpen, setTreeOpen] = useLocalStorage(TREE_KEY, TREE_OPEN_DEFAULT);
 
   const isJefeOrAdmin = hasRole(
     ROLE_CODES.ADMIN_SV,
@@ -97,85 +156,22 @@ export function AppLayout() {
     ROLE_CODES.JEFE,
   );
 
-  const refresh = useCallback(async () => {
-    if (!user) return;
-    try {
-      const overview = await api<Overview>('/admin/overview');
-      setGapsCount(overview.huecos_pendientes ?? 0);
-    } catch {
-      /* silencioso */
-    }
-    try {
-      const versions = await api<VersionRow[]>(
-        '/planning/versions?capa=PLANIFICADA',
-      );
-      setReviewCount(versions.filter((v) => v.estado === 'EN_REVISION').length);
-    } catch {
-      /* idem */
-    }
-  }, [user]);
-
-  useEffect(() => {
-    if (!user || !isJefeOrAdmin) return;
-    void refresh();
-    const id = window.setInterval(() => void refresh(), REFRESH_MS);
-    return () => window.clearInterval(id);
-  }, [user, isJefeOrAdmin, refresh]);
-
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      const mod = e.ctrlKey || e.metaKey;
-      if (mod && e.key.toLowerCase() === 'k') {
-        e.preventDefault();
-        setPaletteOpen((v) => !v);
-      }
-      if (mod && e.key === '/') {
-        e.preventDefault();
-        setPaletteOpen(true);
-      }
-    }
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
-
-  const groups = useMemo(() => {
-    const operation: NavDef[] = [
-      { to: '/', end: true, label: 'Inicio', icon: Icons.home },
+  const branches = useMemo<NavBranch[]>(
+    () => [
       {
-        to: '/cronograma-planificado',
-        label: 'Cronograma planificado',
+        id: 'cuadratura',
+        label: 'Cuadratura',
         icon: Icons.calendar,
-        badge: <CountBadge n={reviewCount} tone="warn" />,
+        children: [
+          { label: 'E.P.I', icon: Icons.shield, soon: true },
+          { to: '/inspectores', label: 'Inspectores', icon: Icons.admin },
+          { to: '/ocupacion', label: 'Ocupación', icon: Icons.mobile },
+          { label: 'Operador B.O.', icon: Icons.radio, soon: true },
+        ],
       },
-      {
-        to: '/cronograma-real',
-        label: 'Cronograma real',
-        icon: Icons.gaps,
-        badge: <CountBadge n={gapsCount} tone={gapsCount > 20 ? 'danger' : 'warn'} />,
-      },
-    ];
-
-    const system: NavDef[] = [];
-    if (isJefeOrAdmin) {
-      system.push({
-        to: '/proyeccion',
-        label: 'Proyección',
-        icon: Icons.engine,
-      });
-      system.push({
-        to: '/administracion',
-        label: 'Administración',
-        icon: Icons.admin,
-      });
-    }
-
-    return [
-      { id: 'op', title: 'Cronogramas', items: operation },
-      ...(system.length
-        ? [{ id: 'sys', title: 'Sistema', items: system }]
-        : []),
-    ];
-  }, [gapsCount, reviewCount, isJefeOrAdmin]);
+    ],
+    [],
+  );
 
   if (loading) {
     return <div className="login-page muted">Cargando sesión…</div>;
@@ -204,36 +200,29 @@ export function AppLayout() {
           {!collapsed ? (
             <p className="sidebar-tagline">Cuadratura operativa</p>
           ) : null}
-
-          <button
-            type="button"
-            className="sidebar-search"
-            onClick={() => setPaletteOpen(true)}
-            title="Buscar (Ctrl + K)"
-          >
-            <Icons.search size={16} />
-            {!collapsed ? (
-              <>
-                <span className="sidebar-search-label">Buscar…</span>
-                <kbd className="sidebar-kbd">Ctrl K</kbd>
-              </>
-            ) : null}
-          </button>
         </div>
 
         <nav className="nav" aria-label="Módulos">
-          {groups.map((g) => (
-            <div className="nav-group" key={g.id}>
-              {!collapsed ? (
-                <div className="nav-group-title">{g.title}</div>
-              ) : (
-                <div className="nav-group-rule" aria-hidden />
-              )}
-              {g.items.map((item) => (
-                <NavItem key={item.to} item={item} collapsed={collapsed} />
-              ))}
-            </div>
+          {branches.map((branch) => (
+            <NavTree
+              key={branch.id}
+              branch={branch}
+              collapsed={collapsed}
+              open={treeOpen[branch.id] !== false}
+              onToggle={() =>
+                setTreeOpen((prev) => ({
+                  ...prev,
+                  [branch.id]: prev[branch.id] === false,
+                }))
+              }
+            />
           ))}
+          {isJefeOrAdmin ? (
+            <NavItem
+              item={{ to: '/administracion', label: 'Administración', icon: Icons.admin }}
+              collapsed={collapsed}
+            />
+          ) : null}
         </nav>
 
         <div className="sidebar-footer">
@@ -264,19 +253,11 @@ export function AppLayout() {
       </aside>
 
       <div className="main-column">
-        <InstitutionalTopbar
-          userName={user.displayName}
-          onSearch={() => setPaletteOpen(true)}
-        />
+        <InstitutionalTopbar userName={user.displayName} />
         <main className="main">
           <Outlet />
         </main>
       </div>
-
-      <CommandPalette
-        open={paletteOpen}
-        onClose={() => setPaletteOpen(false)}
-      />
     </div>
   );
 }

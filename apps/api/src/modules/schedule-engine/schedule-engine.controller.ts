@@ -4,9 +4,12 @@ import {
   IsBoolean,
   IsDateString,
   IsIn,
+  IsInt,
   IsOptional,
   IsString,
   IsUUID,
+  Max,
+  Min,
   MinLength,
 } from 'class-validator';
 import { ROLE_CODES } from '@plataforma/shared';
@@ -14,12 +17,46 @@ import { CurrentUser, RequestUser } from '../identity/current-user.decorator';
 import { Roles, RolesGuard } from '../identity/roles.guard';
 import { ScheduleEngineService } from './schedule-engine.service';
 
+class DesdoblesDto {
+  @IsDateString()
+  date_from!: string;
+
+  @IsDateString()
+  date_to!: string;
+
+  /**
+   * Habilita el móvil 4 como destino cuando la pareja está llena. Comparte
+   * franja horaria, pero se gestiona a mano: por defecto queda deshabilitado.
+   */
+  @IsOptional()
+  @IsBoolean()
+  permitir_movil4?: boolean;
+}
+
 class ProjectDto {
   @IsDateString()
   date_from!: string;
 
   @IsDateString()
   date_to!: string;
+}
+
+class OcupacionDto {
+  @IsDateString()
+  date_from!: string;
+
+  @IsDateString()
+  date_to!: string;
+
+  /** Devuelve el reparto crudo, antes de resolver las superposiciones. */
+  @IsOptional()
+  @IsBoolean()
+  sin_desdoblar?: boolean;
+
+  /** Ver `DesdoblesDto.permitir_movil4`. Solo aplica si se desdobla. */
+  @IsOptional()
+  @IsBoolean()
+  permitir_movil4?: boolean;
 }
 
 class WipeDto {
@@ -62,6 +99,37 @@ class InspectorSwapDto {
   rematerialize?: boolean;
 }
 
+class AssignmentDto {
+  @IsUUID()
+  inspector_id!: string;
+
+  @IsDateString()
+  date_from!: string;
+
+  @IsDateString()
+  date_to!: string;
+
+  /** Turno destino. Si se omite, se conserva el de la cuadratura base. */
+  @IsOptional()
+  @IsIn(['M', 'T', 'N'])
+  shift?: 'M' | 'T' | 'N';
+
+  /** Móvil destino. Si se omite, se conserva el de la cuadratura base. */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(7)
+  mobile?: number;
+
+  @IsOptional()
+  @IsString()
+  reason?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  rematerialize?: boolean;
+}
+
 class AbsenceDto {
   @IsUUID()
   inspector_id!: string;
@@ -80,6 +148,10 @@ class AbsenceDto {
   reason?: string;
 
   @IsOptional()
+  @IsUUID()
+  catalogo_licencia_id?: string;
+
+  @IsOptional()
   @IsBoolean()
   rematerialize?: boolean;
 }
@@ -93,6 +165,33 @@ export class ScheduleEngineController {
   @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE)
   preview(@Body() body: ProjectDto) {
     return this.engine.preview(body.date_from, body.date_to);
+  }
+
+  /**
+   * Ocupación por móvil, turno y día: cuántos inspectores hay en cada uno y
+   * quiénes son, más los totales por día y por móvil. Solo lee.
+   */
+  @Post('ocupacion')
+  @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE, ROLE_CODES.CONSULTA)
+  ocupacion(@Body() body: OcupacionDto) {
+    return this.engine.ocupacion(body.date_from, body.date_to, {
+      sinDesdoblar: body.sin_desdoblar ?? false,
+      permitirMovil4: body.permitir_movil4 ?? false,
+    });
+  }
+
+  /**
+   * Superposiciones de 3 inspectores en un móvil y cómo se resolverían.
+   * Simula: devuelve cada movimiento con su justificación, sin escribir nada.
+   */
+  @Post('desdobles/preview')
+  @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE)
+  previewDesdobles(@Body() body: DesdoblesDto) {
+    return this.engine.previewDesdobles(
+      body.date_from,
+      body.date_to,
+      body.permitir_movil4 ?? false,
+    );
   }
 
   @Post('apply')
@@ -145,6 +244,22 @@ export class ScheduleEngineController {
     });
   }
 
+  /** Cambio de turno y/o móvil por un rango (overlay REAL; no toca PLAN). */
+  @Post('assignment')
+  @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE)
+  assignment(@Body() body: AssignmentDto, @CurrentUser() user: RequestUser) {
+    return this.engine.registerOperationalAssignment({
+      inspectorId: body.inspector_id,
+      dateFrom: body.date_from,
+      dateTo: body.date_to,
+      shift: body.shift ?? null,
+      mobile: body.mobile ?? null,
+      userId: user.userId,
+      reason: body.reason,
+      rematerialize: body.rematerialize ?? true,
+    });
+  }
+
   /** Vacación / licencia / feriado / enfermedad operativa (overlay REAL). */
   @Post('absence')
   @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE)
@@ -156,6 +271,7 @@ export class ScheduleEngineController {
       kind: body.kind,
       userId: user.userId,
       reason: body.reason,
+      catalogoLicenciaId: body.catalogo_licencia_id,
       rematerialize: body.rematerialize ?? true,
     });
   }
