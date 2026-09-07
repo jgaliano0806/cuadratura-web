@@ -28,7 +28,29 @@ export async function api<T>(
   const t = token();
   if (t) headers.set('Authorization', `Bearer ${t}`);
 
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const ac = new AbortController();
+  const timer = window.setTimeout(() => ac.abort(), 12000);
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers,
+      signal: options.signal ?? ac.signal,
+    });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      throw new ApiError(
+        'La API no responde. Ejecutá abrir-cuadratura.bat y recargá.',
+        0,
+      );
+    }
+    throw new ApiError(
+      'No hay conexión con la API. Ejecutá abrir-cuadratura.bat y recargá.',
+      0,
+    );
+  } finally {
+    window.clearTimeout(timer);
+  }
   if (!res.ok) {
     let message = res.statusText;
     let body: unknown;

@@ -36,12 +36,23 @@ export class PlanningService {
               i.nombres,
               i.apellido,
               i.nombre_completo AS inspector,
-              lic.licencia_codigo,
-              lic.color_fondo AS licencia_color_fondo,
-              lic.color_letra AS licencia_color_letra,
+              COALESCE(
+                CASE WHEN cr.capa = 'REAL' THEN lic.licencia_codigo END,
+                cat.licencia_codigo
+              ) AS licencia_codigo,
+              COALESCE(
+                CASE WHEN cr.capa = 'REAL' THEN lic.color_fondo END,
+                cat.color_fondo
+              ) AS licencia_color_fondo,
+              COALESCE(
+                CASE WHEN cr.capa = 'REAL' THEN lic.color_letra END,
+                cat.color_letra
+              ) AS licencia_color_letra,
               it.nombre_completo AS inspector_titular,
               ia.nombre_completo AS inspector_asignado
        FROM seguridad_vial.dia_cronograma d
+       JOIN seguridad_vial.cronograma_version cv ON cv.id = d.version_id
+       JOIN seguridad_vial.cronograma cr ON cr.id = cv.cronograma_id
        LEFT JOIN seguridad_vial.movil m ON m.id = d.movil_id
        JOIN seguridad_vial.posicion_cuadratura p ON p.id = d.posicion_id
        LEFT JOIN seguridad_vial.inspector it ON it.id = d.inspector_titular_id
@@ -62,15 +73,33 @@ export class PlanningService {
                 cl.color_letra
          FROM seguridad_vial.asignacion_operativa ao
          JOIN seguridad_vial.catalogo_licencia cl ON cl.id = ao.catalogo_licencia_id
-         WHERE ao.estado = 'ACTIVA'
+         WHERE cr.capa = 'REAL'
+           AND ao.estado = 'ACTIVA'
            AND ao.tipo = 'LICENCIA'
-           AND ao.tipo_dia = 'LICENCIA'
            AND ao.inspector_id = resolved.inspector_id
            AND d.fecha_operativa >= ao.fecha_desde
            AND (ao.fecha_hasta IS NULL OR d.fecha_operativa <= ao.fecha_hasta)
          ORDER BY ao.creada_en DESC
          LIMIT 1
        ) lic ON true
+       LEFT JOIN LATERAL (
+         SELECT cl.codigo AS licencia_codigo,
+                cl.color_fondo,
+                cl.color_letra
+         FROM seguridad_vial.catalogo_licencia cl
+         WHERE cl.activo = true
+           AND upper(cl.codigo) = upper(COALESCE(
+                 NULLIF(btrim(d.codigo), ''),
+                 CASE d.tipo_dia::text
+                   WHEN 'VACACION' THEN 'V'
+                   WHEN 'ENFERMEDAD' THEN 'EF'
+                   WHEN 'FRANCO' THEN 'F'
+                   ELSE NULL
+                 END
+               ))
+         ORDER BY CASE cl.ambito WHEN 'SEGURIDAD_VIAL' THEN 0 ELSE 1 END, cl.orden
+         LIMIT 1
+       ) cat ON true
        WHERE d.version_id = $1
          AND i.id IS NOT NULL
          AND i.estado = 'ACTIVO'

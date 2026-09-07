@@ -15,7 +15,7 @@ export class DatabaseService implements OnModuleDestroy {
   constructor(config: ConfigService) {
     const connectionString =
       config.get<string>('DATABASE_URL') ??
-      'postgresql://seguridad_vial:seguridad_vial_local@localhost:5432/seguridad_vial';
+      'postgresql://seguridad_vial:seguridad_vial_local@localhost:55433/seguridad_vial';
     this.pool = new Pool({ connectionString });
   }
 

@@ -61,7 +61,7 @@ export function InspectorMasterList({
         {filtered.map((insp) => {
           const today = todayByKey?.get(insp.key);
           const tone = today
-            ? cellTone(today.codigo, today.tipo_dia)
+            ? cellTone(today.codigo, today.tipo_dia, today.licencia_codigo)
             : 'neutral';
           return (
             <button

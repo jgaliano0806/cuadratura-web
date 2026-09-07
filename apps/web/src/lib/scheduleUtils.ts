@@ -151,30 +151,110 @@ export function rowKey(row: DayRow) {
   return row.inspector_id || row.legajo || row.inspector || row.posicion_codigo;
 }
 
-export function cellTone(codigo: string, tipo: string): string {
-  if (tipo === 'VACACION' || codigo === 'V') return 'vacacion';
-  if (tipo === 'ENFERMEDAD' || codigo === 'EF') return 'enfermedad';
-  if (tipo === 'FRANCO' || codigo === 'F') return 'franco';
-  if (codigo.startsWith('M')) return 'manana';
-  if (codigo.startsWith('T')) return 'tarde';
-  if (codigo.startsWith('N')) return 'noche';
+/** Paleta canónica compartida entre cuadratura, leyenda y administración. */
+export const TONE_PALETTE = {
+  manana: { bg: '#2f6b28', fg: '#e8f6df', label: 'Mañana' },
+  tarde: { bg: '#8a5c10', fg: '#fff1c4', label: 'Tarde' },
+  noche: { bg: '#2d4480', fg: '#dce6fb', label: 'Noche' },
+  franco: { bg: '#3d4340', fg: '#e4e7e0', label: 'Franco' },
+  vacacion: { bg: '#7a331c', fg: '#f8ddd0', label: 'Vacaciones' },
+  enfermedad: { bg: '#7a2424', fg: '#f8d4d4', label: 'Enfermedad' },
+  neutral: { bg: '#3f4a42', fg: '#dfe3dc', label: 'Otro' },
+} as const;
+
+export type ToneKey = keyof typeof TONE_PALETTE;
+
+let toneOverrides: Partial<Record<ToneKey, { bg: string; fg: string }>> = {};
+
+export function setToneOverrides(
+  next: Partial<Record<ToneKey, { bg: string; fg: string }>>,
+) {
+  toneOverrides = next;
+}
+
+export function resolveTone(tone: ToneKey) {
+  const base = TONE_PALETTE[tone] ?? TONE_PALETTE.neutral;
+  const over = toneOverrides[tone];
+  return over ? { ...base, ...over } : base;
+}
+
+export function colorValido(value: string | null | undefined): string | undefined {
+  const raw = value?.trim();
+  if (!raw) return undefined;
+  const v = raw.startsWith('#') ? raw.toUpperCase() : `#${raw.toUpperCase()}`;
+  if (!/^#[0-9A-F]{6}$/.test(v) && !/^#[0-9A-F]{3}$/.test(v)) return undefined;
+  const hex =
+    v.length === 4
+      ? `#${v[1]}${v[1]}${v[2]}${v[2]}${v[3]}${v[3]}`
+      : v;
+  if (hex === '#000000') return undefined;
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  if (r + g + b < 24) return undefined;
+  return hex;
+}
+
+export function boxIdDeCodigo(codigo: string | null | undefined) {
+  const c = (codigo || '').trim().toUpperCase();
+  if (c === 'V') return 'vacacion' as const;
+  if (c === 'EF') return 'enfermedad' as const;
+  if (c === 'F') return 'franco' as const;
+  if (c === 'M' || /^M\d+$/.test(c)) return 'manana' as const;
+  if (c === 'T' || /^T\d+$/.test(c)) return 'tarde' as const;
+  if (c === 'N' || /^N\d+$/.test(c)) return 'noche' as const;
+  return null;
+}
+
+export function resolveCodeColors(
+  codigo: string | null | undefined,
+  tipo: string,
+  dbBg?: string | null,
+  dbFg?: string | null,
+  licenciaCodigo?: string | null,
+): { bg: string; fg: string } | null {
+  const tone = cellTone(codigo, tipo, licenciaCodigo) as ToneKey;
+  const fallback = resolveTone(tone);
+  if (tone !== 'neutral') return fallback;
+  const bg = colorValido(dbBg);
+  const fg = colorValido(dbFg);
+  if (bg || fg) return { bg: bg || fallback.bg, fg: fg || fallback.fg };
+  return fallback;
+}
+
+export function cellTone(
+  codigo: string | null | undefined,
+  tipo: string,
+  licenciaCodigo?: string | null,
+): string {
+  const lic = (licenciaCodigo || '').trim().toUpperCase();
+  const c = (codigo || '').trim().toUpperCase();
+  const t = (tipo || '').trim().toUpperCase();
+  if (lic === 'V' || c === 'V' || t === 'VACACION') return 'vacacion';
+  if (lic === 'EF' || c === 'EF' || t === 'ENFERMEDAD') return 'enfermedad';
+  if (c === 'M' || /^M\d+$/.test(c)) return 'manana';
+  if (c === 'T' || /^T\d+$/.test(c)) return 'tarde';
+  if (c === 'N' || /^N\d+$/.test(c)) return 'noche';
+  if (lic === 'F' || c === 'F' || t === 'FRANCO') return 'franco';
+  if (!c && !t) return 'neutral';
   return 'neutral';
 }
 
-/** Etiqueta corta para celda SAP: "M · 1", "F", "V". */
+/** Código de celda, igual que Administración → Códigos (T5, M1, F, V, EF, AC…). */
 export function cellShortLabel(cell: DayRow): string {
-  if (cell.codigo === 'F' || cell.tipo_dia === 'FRANCO') return 'F';
-  if (cell.codigo === 'V' || cell.tipo_dia === 'VACACION') return 'V';
-  if (cell.codigo === 'EF' || cell.tipo_dia === 'ENFERMEDAD') return 'EF';
-  if (/^[MTN]\d/.test(cell.codigo)) {
-    const turno = cell.codigo[0];
-    const movil = cell.movil ?? Number(cell.codigo.slice(1));
-    return `${turno} · ${movil}`;
-  }
-  return cell.codigo;
+  const lic = (cell.licencia_codigo || '').trim().toUpperCase();
+  if (lic) return lic;
+  if (cell.tipo_dia === 'VACACION') return 'V';
+  if (cell.tipo_dia === 'ENFERMEDAD') return 'EF';
+  const c = (cell.codigo || '').trim();
+  if (c) return c;
+  if (cell.tipo_dia === 'FRANCO') return 'F';
+  if (cell.turno && cell.movil != null) return `${cell.turno}${cell.movil}`;
+  return '';
 }
 
 export function cellDetailLabel(cell: DayRow): string {
+  if (!cell.codigo && !cell.tipo_dia) return 'Sin dato';
   if (cell.codigo === 'F' || cell.tipo_dia === 'FRANCO') return 'Franco';
   if (cell.codigo === 'V' || cell.tipo_dia === 'VACACION') return 'Vacaciones';
   if (cell.codigo === 'EF' || cell.tipo_dia === 'ENFERMEDAD') return 'Enfermedad';

@@ -9,3 +9,7 @@ export { PeoplePicker } from './PeoplePicker';
 export type { Person } from './PeoplePicker';
 export { FilterPicker } from './FilterPicker';
 export type { FilterOption } from './FilterPicker';
+export { SearchSelect } from './SearchSelect';
+export type { SearchSelectOption } from './SearchSelect';
+export { ExcelMenu } from './ExcelMenu';
+export type { ExcelMenuItem } from './ExcelMenu';

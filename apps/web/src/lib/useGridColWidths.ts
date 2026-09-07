@@ -2,12 +2,13 @@ import { useCallback, useEffect, useState, type MouseEvent } from 'react';
 
 const KEY = 'cuad-grid-cols';
 
-export type GridColKey = 'legajo' | 'name' | 'day';
+export type GridColKey = 'legajo' | 'name' | 'seccion' | 'day';
 
-const DEFAULTS: Record<GridColKey, number> = { legajo: 90, name: 224, day: 46 };
+const DEFAULTS: Record<GridColKey, number> = { legajo: 90, name: 224, seccion: 108, day: 46 };
 const LIMITS: Record<GridColKey, [number, number]> = {
   legajo: [56, 240],
   name: [120, 520],
+  seccion: [72, 220],
   day: [32, 110],
 };
 
@@ -19,6 +20,7 @@ function leer(): Record<GridColKey, number> {
     return {
       legajo: clamp('legajo', p.legajo ?? DEFAULTS.legajo),
       name: clamp('name', p.name ?? DEFAULTS.name),
+      seccion: clamp('seccion', p.seccion ?? DEFAULTS.seccion),
       day: clamp('day', p.day ?? DEFAULTS.day),
     };
   } catch {

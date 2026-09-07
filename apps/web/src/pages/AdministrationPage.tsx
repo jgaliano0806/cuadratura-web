@@ -1,15 +1,39 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../lib/api';
-import { Modal } from '../components/ui';
+import { FilterPicker, Modal, type SearchSelectOption } from '../components/ui';
+import { AppearancePanel } from '../components/AppearancePanel';
 import { apellidoYNombre } from '../lib/personLabel';
+import { downloadCsv } from '../lib/csv';
+import { isoToDmy } from '../lib/dateRange';
+import {
+  esSeccionPeaje,
+  etiquetaRolSeccion,
+  etiquetaSeccion,
+  parseAmbito,
+  parsePlantel,
+  plantelDeSeccion,
+  plantelPorDefecto,
+  PLANTEL_AMBITO,
+  PLANTELES,
+  seccionDePlantel,
+  SECCIONES_SV_SORTED,
+  type AmbitoId,
+  type PlantelId,
+  type SeccionSv,
+} from '../lib/plantel';
+import { boxIdDeCodigo, colorValido, resolveCodeColors } from '../lib/scheduleUtils';
+import { useBoxTheme } from '../lib/boxTheme';
 
 type Tab =
   | 'inspectores'
   | 'licencias'
+  | 'motivos'
   | 'moviles'
   | 'posiciones'
   | 'perfiles'
-  | 'usuarios';
+  | 'usuarios'
+  | 'apariencia';
 
 type Column = { key: string; label: string; secondary?: string };
 
@@ -24,11 +48,24 @@ type InspectorRow = {
   vigencia_desde?: string | null;
   posicion_codigo?: string | null;
   posicion_etiqueta?: string | null;
+  seccion?: string | null;
+};
+
+type HistorialFila = {
+  origen: string;
+  seccion: string;
+  fecha_desde: string;
+  fecha_hasta: string | null;
+  posicion_codigo: string | null;
+  posicion_etiqueta: string | null;
+  motivo: string;
 };
 
 type PosicionOpt = {
   id: string;
   codigo: string;
+  tipo?: string | null;
+  perfil_id?: string | null;
   perfil: string;
   turnos: string;
   moviles: string;
@@ -36,14 +73,59 @@ type PosicionOpt = {
   ocupante: string | null;
 };
 
+function claveGrupoPosicion(p: PosicionOpt): string {
+  if (p.tipo === 'MOVIL4' || /^M4-/i.test(p.codigo)) return 'MOVIL4';
+  if (p.tipo === 'MOVIL6' || /^M6-/i.test(p.codigo)) return 'MOVIL6';
+  if (p.tipo === 'MOVIL7' || /^M7-/i.test(p.codigo)) return 'MOVIL7';
+  if (p.tipo === 'VINCULADA') return 'VINCULADA';
+  return 'GENERAL';
+}
+
+function nombreGrupoClave(clave: string): string {
+  if (clave === 'MOVIL4') return 'Móvil 4';
+  if (clave === 'MOVIL6') return 'Móvil 6';
+  if (clave === 'MOVIL7') return 'Móvil 7';
+  if (clave === 'VINCULADA') return 'Dupla';
+  return 'Rotación de móviles';
+}
+
+function idSecuencia(p: PosicionOpt): string {
+  return p.perfil_id || `${claveGrupoPosicion(p)}|${p.moviles}|${p.turnos}`;
+}
+
+function etiquetaSecuencia(p: PosicionOpt): string {
+  const ciclo = [p.moviles, p.turnos].filter((x) => x && x !== '—').join(' / ');
+  const clave = claveGrupoPosicion(p);
+  if (clave === 'GENERAL') return ciclo || 'Rotación de móviles';
+  const nombre = nombreGrupoClave(clave);
+  return ciclo ? `${nombre} · ${ciclo}` : nombre;
+}
+
+function etiquetaPlaza(p: PosicionOpt, personaId?: string | null): string {
+  if (!p.ocupante) return `${p.codigo} · libre`;
+  if (personaId && p.ocupante_id === personaId) return `${p.codigo} · esta persona`;
+  return `${p.codigo} · ocupada`;
+}
+
 type LicenciaRow = {
   id: string;
   codigo: string;
+  codigo_sap?: string | null;
   nombre: string;
+  horario?: string | null;
+  ambito?: string;
+  tipo?: string;
   activo: boolean;
   orden: number;
   color_fondo?: string | null;
   color_letra?: string | null;
+};
+
+type MotivoRow = {
+  id: string;
+  nombre: string;
+  activo: boolean;
+  orden: number;
 };
 
 type MovilRow = {
@@ -60,7 +142,10 @@ type MovilRow = {
 
 type BaseRow = { id: string; codigo: string; nombre: string };
 
-const COLUMNS: Record<Exclude<Tab, 'inspectores' | 'licencias' | 'moviles'>, Column[]> = {
+const COLUMNS: Record<
+  Exclude<Tab, 'inspectores' | 'licencias' | 'motivos' | 'moviles' | 'apariencia'>,
+  Column[]
+> = {
   posiciones: [
     { key: 'ocupante_vigente', label: 'Inspector' },
     { key: 'codigo', label: 'Código posición' },
@@ -91,18 +176,23 @@ function mensaje(e: unknown): string {
   return 'Error inesperado';
 }
 
-function partesNombre(row: InspectorRow): { apellido: string; nombres: string } {
-  const ape = (row.apellido || '').trim();
-  const nom = (row.nombres || '').trim();
-  if (ape || nom) return { apellido: ape, nombres: nom };
-  const raw = (row.nombre_completo || '').trim();
-  if (!raw) return { apellido: '', nombres: '' };
-  if (raw.includes(',')) {
-    const [a, ...rest] = raw.split(',');
-    return { apellido: a.trim(), nombres: rest.join(',').trim() };
+function normalizarTexto(s: string) {
+  return s
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase();
+}
+
+function partirNombre(raw: string): { apellido: string; nombres: string } {
+  const t = raw.trim();
+  if (!t) return { apellido: '', nombres: '' };
+  if (t.includes(',')) {
+    const [a, ...rest] = t.split(',');
+    return { apellido: a.trim(), nombres: rest.join(',').trim() || a.trim() };
   }
-  const sp = raw.split(/\s+/);
-  return { apellido: sp[0] || '', nombres: sp.slice(1).join(' ') };
+  const sp = t.split(/\s+/);
+  if (sp.length === 1) return { apellido: sp[0], nombres: sp[0] };
+  return { apellido: sp[0], nombres: sp.slice(1).join(' ') };
 }
 
 function hoyIso(): string {
@@ -125,36 +215,67 @@ function cellSecondary(row: Record<string, unknown>, col: Column): string | null
 
 type InspectorForm = {
   id?: string;
-  apellido: string;
-  nombres: string;
+  nombre: string;
   legajo: string;
+  seccion: SeccionSv;
   tipo_plantel: 'TITULAR' | 'REEMPLAZANTE';
   fecha_desde: string;
   posicion_id: string;
   posicion_inicial?: string;
+  secuencia_id: string;
+  nueva_moviles: number[];
+  nueva_turnos: Array<'M' | 'N' | 'T'>;
 };
 
 const FORM_VACIO: InspectorForm = {
-  apellido: '',
-  nombres: '',
+  nombre: '',
   legajo: '',
+  seccion: 'MOVILES',
   tipo_plantel: 'TITULAR',
   fecha_desde: hoyIso(),
   posicion_id: '',
+  secuencia_id: '',
+  nueva_moviles: [],
+  nueva_turnos: [],
 };
 
+const TURNOS_SEQ: Array<'M' | 'N' | 'T'> = ['M', 'N', 'T'];
+
 export function AdministrationPage() {
+  const [params, setParams] = useSearchParams();
+  const { patchBox } = useBoxTheme();
+  const ambitoUi = parseAmbito(params.get('ambito'), params.get('plantel'));
+  const plantel = parsePlantel(params.get('plantel'), ambitoUi);
+  const plantelLabel = PLANTELES.find((p) => p.id === plantel)?.label ?? 'Inspectores';
+  const ambito = PLANTEL_AMBITO[plantel];
   const [tab, setTab] = useState<Tab>('inspectores');
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
   const [inspectores, setInspectores] = useState<InspectorRow[]>([]);
   const [posiciones, setPosiciones] = useState<PosicionOpt[]>([]);
   const [licencias, setLicencias] = useState<LicenciaRow[]>([]);
+  const [motivos, setMotivos] = useState<MotivoRow[]>([]);
   const [moviles, setMoviles] = useState<MovilRow[]>([]);
   const [bases, setBases] = useState<BaseRow[]>([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState<InspectorForm | null>(null);
+  const [historial, setHistorial] = useState<{
+    nombre: string;
+    filas: HistorialFila[];
+  } | null>(null);
   const [licEdit, setLicEdit] = useState<Partial<LicenciaRow> | null>(null);
+  const [motEdit, setMotEdit] = useState<Partial<MotivoRow> | null>(null);
+  const [filtroTexto, setFiltroTexto] = useState('');
+  const [filtroEstado, setFiltroEstado] = useState<string[]>([]);
+  const [filtroCondicion, setFiltroCondicion] = useState<string[]>([]);
+  const [filtroSeccion, setFiltroSeccion] = useState<string[]>([]);
+  const [filtroSecuencia, setFiltroSecuencia] = useState<string[]>([]);
+  // filtros tab licencias
+  const [licFiltroTexto, setLicFiltroTexto] = useState('');
+  const [licFiltroTipo, setLicFiltroTipo] = useState<string[]>([]);
+  const [licFiltroEstado, setLicFiltroEstado] = useState<string[]>([]);
+  const [motFiltroTexto, setMotFiltroTexto] = useState('');
+  const [motFiltroEstado, setMotFiltroEstado] = useState<string[]>([]);
   const [movilForm, setMovilForm] = useState<{
     id?: string;
     numero: string;
@@ -164,6 +285,95 @@ export function AdministrationPage() {
     estado: string;
   } | null>(null);
 
+  function setAmbito(id: AmbitoId) {
+    setParams(
+      (prev) => {
+        const n = new URLSearchParams(prev);
+        n.set('ambito', id);
+        n.set('plantel', plantelPorDefecto(id));
+        return n;
+      },
+      { replace: true },
+    );
+  }
+
+  function setPlantel(id: PlantelId) {
+    setParams(
+      (prev) => {
+        const n = new URLSearchParams(prev);
+        n.set('plantel', id);
+        n.set('ambito', ambitoUi);
+        return n;
+      },
+      { replace: true },
+    );
+  }
+
+  const seccionVista = seccionDePlantel(plantel);
+  // personasVista = todos los inspectores (sin filtrar por sección del switch)
+  const personasVista = inspectores;
+  const personasFiltradas = useMemo(() => {
+    const q = normalizarTexto(filtroTexto.trim());
+    const est = new Set(filtroEstado);
+    const cond = new Set(filtroCondicion);
+    const sec = new Set(filtroSeccion);
+    const seq = new Set(filtroSecuencia);
+    return personasVista.filter((row) => {
+      if (est.size && !est.has(row.estado)) return false;
+      const tipo = row.tipo_plantel === 'PEAJISTA' ? 'PEAJISTA' : row.tipo_plantel === 'REEMPLAZANTE' ? 'REEMPLAZANTE' : 'TITULAR';
+      if (cond.size && !cond.has(tipo)) return false;
+      const rowSeccion = row.seccion || 'MOVILES';
+      if (sec.size && !sec.has(rowSeccion)) return false;
+      const secId = row.posicion_codigo || 'sin';
+      if (seq.size && !seq.has(secId)) return false;
+      if (!q) return true;
+      const blob = normalizarTexto(
+        [row.legajo, apellidoYNombre(row), row.posicion_etiqueta, row.posicion_codigo].join(' '),
+      );
+      return blob.includes(q);
+    });
+  }, [personasVista, filtroTexto, filtroEstado, filtroCondicion, filtroSeccion, filtroSecuencia]);
+  const codigosVista = useMemo(() => {
+    const q = normalizarTexto(licFiltroTexto.trim());
+    const tipos = new Set(licFiltroTipo);
+    const estados = new Set(licFiltroEstado);
+    const unicos = new Map<string, LicenciaRow>();
+    for (const l of licencias) {
+      const key = l.codigo.trim().toUpperCase();
+      const prev = unicos.get(key);
+      if (!prev || (prev.ambito !== 'SEGURIDAD_VIAL' && l.ambito === 'SEGURIDAD_VIAL')) {
+        unicos.set(key, l);
+      }
+    }
+    return [...unicos.values()]
+      .sort((a, b) => (a.orden ?? 0) - (b.orden ?? 0) || a.codigo.localeCompare(b.codigo, 'es'))
+      .filter((l) => {
+      if (tipos.size && !tipos.has(l.tipo ?? 'AUSENCIA')) return false;
+      if (estados.size) {
+        const est = l.activo ? 'ACTIVO' : 'INACTIVO';
+        if (!estados.has(est)) return false;
+      }
+      if (!q) return true;
+      const blob = normalizarTexto(
+        [l.codigo, l.codigo_sap, l.nombre, l.horario].join(' '),
+      );
+      return blob.includes(q);
+    });
+  }, [licencias, licFiltroTexto, licFiltroTipo, licFiltroEstado]);
+
+  const motivosVista = useMemo(() => {
+    const q = normalizarTexto(motFiltroTexto);
+    const estados = new Set(motFiltroEstado);
+    return motivos.filter((m) => {
+      if (estados.size) {
+        const est = m.activo ? 'ACTIVO' : 'INACTIVO';
+        if (!estados.has(est)) return false;
+      }
+      if (!q) return true;
+      return normalizarTexto(m.nombre).includes(q);
+    });
+  }, [motivos, motFiltroTexto, motFiltroEstado]);
+
   async function cargarInspectores() {
     const [ins, pos] = await Promise.all([
       api<InspectorRow[]>('/admin/inspectors'),
@@ -171,10 +381,19 @@ export function AdministrationPage() {
     ]);
     setInspectores(ins);
     setPosiciones(pos);
+    if (!moviles.length) {
+      api<MovilRow[]>('/admin/mobiles')
+        .then(setMoviles)
+        .catch(() => undefined);
+    }
   }
 
   async function cargarLicencias() {
     setLicencias(await api<LicenciaRow[]>('/admin/licencias'));
+  }
+
+  async function cargarMotivos() {
+    setMotivos(await api<MotivoRow[]>('/admin/timer-motivos'));
   }
 
   async function cargarMoviles() {
@@ -198,11 +417,19 @@ export function AdministrationPage() {
         await cargarLicencias();
         return;
       }
+      if (tab === 'motivos') {
+        await cargarMotivos();
+        return;
+      }
       if (tab === 'moviles') {
         await cargarMoviles();
         return;
       }
-      const path: Record<Exclude<Tab, 'inspectores' | 'licencias' | 'moviles'>, string> = {
+      if (tab === 'apariencia') return;
+      const path: Record<
+        Exclude<Tab, 'inspectores' | 'licencias' | 'motivos' | 'moviles' | 'apariencia'>,
+        string
+      > = {
         posiciones: '/admin/positions',
         perfiles: '/admin/profiles',
         usuarios: '/admin/users',
@@ -219,35 +446,57 @@ export function AdministrationPage() {
       .finally(() => setBusy(false));
   }, [tab]);
 
+  useEffect(() => {
+    setFiltroTexto('');
+    setFiltroEstado([]);
+    setFiltroCondicion([]);
+    setFiltroSecuencia([]);
+  }, [plantel]);
+
   const tabs: Array<{ id: Tab; label: string }> = [
-    { id: 'inspectores', label: 'Inspectores' },
-    { id: 'licencias', label: 'Licencias' },
+    { id: 'inspectores', label: 'Personas' },
+    { id: 'licencias', label: 'Códigos' },
+    { id: 'motivos', label: 'Motivos' },
     { id: 'moviles', label: 'Móviles' },
-    { id: 'posiciones', label: 'Posiciones' },
-    { id: 'perfiles', label: 'Perfiles' },
     { id: 'usuarios', label: 'Usuarios' },
+    { id: 'apariencia', label: 'Apariencia' },
   ];
 
   const columns =
-    tab === 'inspectores' || tab === 'licencias' || tab === 'moviles' ? [] : COLUMNS[tab];
+    tab === 'inspectores' ||
+    tab === 'licencias' ||
+    tab === 'motivos' ||
+    tab === 'moviles' ||
+    tab === 'apariencia'
+      ? []
+      : COLUMNS[tab];
 
   async function guardarInspector(e: FormEvent) {
     e.preventDefault();
     if (!form) return;
-    if (!form.posicion_id) {
-      setError('Elegí la secuencia (posición). Sin eso no se puede inferir.');
+    const partes = partirNombre(form.nombre);
+    if (!partes.apellido || !partes.nombres) {
+      setError('Escribí apellido y nombre.');
+      return;
+    }
+    if (form.seccion === 'MOVILES' && !form.posicion_id) {
+      setError('Elegí la secuencia y una plaza. Sin eso no se puede inferir.');
       return;
     }
     setBusy(true);
     setError('');
     try {
+      const esPeaje = esSeccionPeaje(form.seccion);
       const body: Record<string, unknown> = {
-        nombres: form.nombres.trim(),
-        apellido: form.apellido.trim(),
+        nombres: partes.nombres,
+        apellido: partes.apellido,
         legajo: form.legajo.trim(),
-        tipo_plantel: form.tipo_plantel,
+        tipo_plantel: esPeaje ? 'PEAJISTA' : form.tipo_plantel,
+        seccion: form.seccion,
       };
-      const cambiaSecuencia = !form.id || form.posicion_id !== form.posicion_inicial;
+      const cambiaSecuencia =
+        form.seccion === 'MOVILES' &&
+        (!form.id || form.posicion_id !== form.posicion_inicial);
       if (cambiaSecuencia) {
         body.fecha_desde = form.fecha_desde;
         body.posicion_id = form.posicion_id;
@@ -263,13 +512,53 @@ export function AdministrationPage() {
           body: JSON.stringify(body),
         });
       }
+      const seccionNueva = form.seccion;
       setForm(null);
+      if (seccionVista !== seccionNueva) setPlantel(plantelDeSeccion(seccionNueva));
       await cargarInspectores();
     } catch (err) {
       setError(mensaje(err));
     } finally {
       setBusy(false);
     }
+  }
+
+  async function abrirHistorial(row: InspectorRow) {
+    setBusy(true);
+    setError('');
+    try {
+      const doc = await api<{
+        inspector: InspectorRow;
+        filas: HistorialFila[];
+      }>(`/admin/inspectors/${row.id}/historial`);
+      setHistorial({
+        nombre: apellidoYNombre(doc.inspector),
+        filas: doc.filas,
+      });
+    } catch (err) {
+      setError(mensaje(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function exportarPersonas() {
+    if (!personasFiltradas.length) {
+      setError('No hay personas para exportar con ese filtro.');
+      return;
+    }
+    downloadCsv(`personas-${seccionVista ?? 'listado'}`, [
+      ['Legajo', 'Apellido y nombre', 'Sección', 'Secuencia', 'Desde', 'Estado', 'Condición'],
+      ...personasFiltradas.map((r) => [
+        r.legajo,
+        apellidoYNombre(r),
+        etiquetaSeccion(r.seccion),
+        r.posicion_etiqueta || r.posicion_codigo || '',
+        r.vigencia_desde ? isoToDmy(r.vigencia_desde) : '',
+        r.estado,
+        r.tipo_plantel === 'REEMPLAZANTE' ? 'Reemplazante' : 'Titular',
+      ]),
+    ]);
   }
 
   async function bajaInspector(row: InspectorRow) {
@@ -286,17 +575,35 @@ export function AdministrationPage() {
     }
   }
 
+  function aplicarColorCodigo(
+    codigo: string | undefined,
+    patch: { bg?: string; fg?: string },
+  ) {
+    const boxId = boxIdDeCodigo(codigo);
+    if (!boxId) return;
+    const actual = resolveCodeColors(codigo, '');
+    patchBox('boxes', boxId, {
+      bg: patch.bg ?? actual?.bg ?? '#3f4a42',
+      fg: patch.fg ?? actual?.fg ?? '#dfe3dc',
+    });
+  }
+
   async function guardarLicencia(e: FormEvent) {
     e.preventDefault();
-    if (!licEdit?.nombre?.trim() || !licEdit.codigo?.trim()) return;
+    const desc = (licEdit.horario || licEdit.nombre || '').trim();
+    if (!licEdit.codigo?.trim() || !desc) return;
     setBusy(true);
     setError('');
     try {
       const body = {
-        nombre: licEdit.nombre.trim(),
+        nombre: desc,
         codigo: licEdit.codigo.trim().toUpperCase(),
-        color_fondo: licEdit.color_fondo || null,
-        color_letra: licEdit.color_letra || null,
+        codigo_sap: licEdit.codigo_sap?.trim() || null,
+        horario: desc,
+        ambito: licEdit.ambito === 'BASE_OPERACIONES' ? 'BASE_OPERACIONES' : 'SEGURIDAD_VIAL',
+        tipo: licEdit.tipo || 'AUSENCIA',
+        color_fondo: colorValido(licEdit.color_fondo) ?? null,
+        color_letra: colorValido(licEdit.color_letra) ?? null,
       };
       if (licEdit.id) {
         await api(`/admin/licencias/${licEdit.id}`, {
@@ -305,6 +612,16 @@ export function AdministrationPage() {
         });
       } else {
         await api('/admin/licencias', { method: 'POST', body: JSON.stringify(body) });
+      }
+      const fondo = colorValido(licEdit.color_fondo);
+      const letra = colorValido(licEdit.color_letra);
+      const boxId = boxIdDeCodigo(body.codigo);
+      if (boxId && (fondo || letra)) {
+        const actual = resolveCodeColors(body.codigo, '');
+        patchBox('boxes', boxId, {
+          bg: fondo ?? actual?.bg ?? '#3f4a42',
+          fg: letra ?? actual?.fg ?? '#dfe3dc',
+        });
       }
       setLicEdit(null);
       await cargarLicencias();
@@ -332,12 +649,69 @@ export function AdministrationPage() {
   }
 
   async function eliminarLicencia(item: LicenciaRow) {
-    if (!confirm(`¿Eliminar ${item.codigo}? Si ya se usó en Real, desactivala.`)) return;
+    if (!confirm(`¿Eliminar ${item.codigo}? Si ya se usó en Real, desactivalo.`)) return;
     setBusy(true);
     setError('');
     try {
       await api(`/admin/licencias/${item.id}`, { method: 'DELETE' });
       await cargarLicencias();
+    } catch (err) {
+      setError(mensaje(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function guardarMotivo(e: FormEvent) {
+    e.preventDefault();
+    const nombre = motEdit?.nombre?.trim() ?? '';
+    if (nombre.length < 3) return;
+    setBusy(true);
+    setError('');
+    try {
+      if (motEdit?.id) {
+        await api(`/admin/timer-motivos/${motEdit.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ nombre }),
+        });
+      } else {
+        await api('/admin/timer-motivos', {
+          method: 'POST',
+          body: JSON.stringify({ nombre }),
+        });
+      }
+      setMotEdit(null);
+      await cargarMotivos();
+    } catch (err) {
+      setError(mensaje(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggleMotivo(item: MotivoRow) {
+    setBusy(true);
+    setError('');
+    try {
+      await api(`/admin/timer-motivos/${item.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ activo: !item.activo }),
+      });
+      await cargarMotivos();
+    } catch (err) {
+      setError(mensaje(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function eliminarMotivo(item: MotivoRow) {
+    if (!confirm(`¿Eliminar “${item.nombre}”? Si ya se usó en el Timer, desactivalo.`)) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api(`/admin/timer-motivos/${item.id}`, { method: 'DELETE' });
+      await cargarMotivos();
     } catch (err) {
       setError(mensaje(err));
     } finally {
@@ -398,13 +772,196 @@ export function AdministrationPage() {
     () => posiciones.find((p) => p.id === form?.posicion_id) ?? null,
     [posiciones, form?.posicion_id],
   );
+  const opcionesSecuencia = useMemo(() => {
+    const ordenGrupo: Record<string, number> = {
+      GENERAL: 0,
+      MOVIL4: 1,
+      MOVIL6: 2,
+      MOVIL7: 3,
+      VINCULADA: 4,
+    };
+    const vistos = new Set<string>();
+    const opts: SearchSelectOption[] = [];
+    const sorted = [...posiciones].sort((a, b) => {
+      const ga = ordenGrupo[claveGrupoPosicion(a)] ?? 9;
+      const gb = ordenGrupo[claveGrupoPosicion(b)] ?? 9;
+      if (ga !== gb) return ga - gb;
+      return etiquetaSecuencia(a).localeCompare(etiquetaSecuencia(b), 'es');
+    });
+    for (const p of sorted) {
+      const id = idSecuencia(p);
+      if (vistos.has(id)) continue;
+      vistos.add(id);
+      opts.push({
+        id,
+        label: etiquetaSecuencia(p),
+        search: [p.perfil, p.moviles, p.turnos, claveGrupoPosicion(p)].filter(Boolean).join(' '),
+      });
+    }
+    opts.push({
+      id: '__new__',
+      label: '+ Nueva secuencia',
+      search: 'nueva secuencia ciclo',
+      action: true,
+    });
+    return opts;
+  }, [posiciones]);
+
+  const plazasDeSecuencia = useMemo(() => {
+    if (!form?.secuencia_id || form.secuencia_id === '__new__') return [];
+    return posiciones.filter((p) => idSecuencia(p) === form.secuencia_id);
+  }, [posiciones, form?.secuencia_id]);
+
+  const opcionesPlaza = useMemo(() => {
+    const selfId = form?.id ?? null;
+    const sorted = [...plazasDeSecuencia].sort((a, b) => {
+      const oa = a.ocupante && a.ocupante_id !== selfId ? 1 : 0;
+      const ob = b.ocupante && b.ocupante_id !== selfId ? 1 : 0;
+      if (oa !== ob) return oa - ob;
+      return a.codigo.localeCompare(b.codigo, 'es', { numeric: true });
+    });
+    const out: SearchSelectOption[] = sorted.map((p) => ({
+      id: p.id,
+      label: etiquetaPlaza(p, selfId),
+      search: [p.codigo, p.ocupante].filter(Boolean).join(' '),
+    }));
+    const sample = plazasDeSecuencia[0];
+    if (sample && claveGrupoPosicion(sample) !== 'VINCULADA') {
+      out.unshift({
+        id: '__new_plaza__',
+        label: '+ Nueva plaza libre',
+        search: 'nueva plaza libre',
+        action: true,
+      });
+    }
+    return out;
+  }, [plazasDeSecuencia, form?.id]);
+
+  function plazaLibreDe(seqId: string, personaId?: string | null) {
+    return (
+      posiciones.find(
+        (p) => idSecuencia(p) === seqId && (!p.ocupante || p.ocupante_id === personaId),
+      ) ?? null
+    );
+  }
+
+  function elegirSecuencia(id: string) {
+    if (!form) return;
+    if (id === '__new__') {
+      setForm({
+        ...form,
+        secuencia_id: '__new__',
+        posicion_id: '',
+        nueva_moviles: form.nueva_moviles,
+        nueva_turnos: form.nueva_turnos.length ? form.nueva_turnos : ['M', 'N', 'T'],
+      });
+      return;
+    }
+    const libre = plazaLibreDe(id, form.id);
+    setForm({
+      ...form,
+      secuencia_id: id,
+      posicion_id: libre?.id || '',
+      nueva_moviles: [],
+      nueva_turnos: [],
+    });
+  }
+
+  async function elegirPlaza(id: string) {
+    if (!form) return;
+    if (id !== '__new_plaza__') {
+      const p = posiciones.find((x) => x.id === id);
+      setForm({
+        ...form,
+        posicion_id: id,
+        secuencia_id: p ? idSecuencia(p) : form.secuencia_id,
+      });
+      return;
+    }
+    if (!form.secuencia_id || form.secuencia_id === '__new__') return;
+    setBusy(true);
+    setError('');
+    try {
+      const creada = await api<PosicionOpt>('/admin/positions', {
+        method: 'POST',
+        body: JSON.stringify({
+          perfil_id: form.secuencia_id,
+          fecha_desde: form.fecha_desde,
+        }),
+      });
+      setPosiciones((prev) => [...prev, creada]);
+      setForm((f) =>
+        f
+          ? { ...f, posicion_id: creada.id, secuencia_id: creada.perfil_id || f.secuencia_id }
+          : f,
+      );
+    } catch (err) {
+      setError(mensaje(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function crearSecuenciaNueva() {
+    if (!form) return;
+    if (!form.nueva_moviles.length || !form.nueva_turnos.length) {
+      setError('Armá el recorrido: al menos un móvil y un turno.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const creada = await api<PosicionOpt>('/admin/positions', {
+        method: 'POST',
+        body: JSON.stringify({
+          moviles: form.nueva_moviles,
+          turnos: form.nueva_turnos,
+          fecha_desde: form.fecha_desde,
+        }),
+      });
+      setPosiciones((prev) => [...prev, creada]);
+      setForm((f) =>
+        f
+          ? {
+              ...f,
+              secuencia_id: creada.perfil_id || idSecuencia(creada),
+              posicion_id: creada.id,
+              nueva_moviles: [],
+              nueva_turnos: [],
+            }
+          : f,
+      );
+    } catch (err) {
+      setError(mensaje(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function toggleNuevoMovil(n: number) {
+    if (!form) return;
+    const has = form.nueva_moviles.includes(n);
+    setForm({
+      ...form,
+      nueva_moviles: has ? form.nueva_moviles.filter((x) => x !== n) : [...form.nueva_moviles, n],
+    });
+  }
+
+  function toggleNuevoTurno(t: 'M' | 'N' | 'T') {
+    if (!form) return;
+    const has = form.nueva_turnos.includes(t);
+    setForm({
+      ...form,
+      nueva_turnos: has ? form.nueva_turnos.filter((x) => x !== t) : [...form.nueva_turnos, t],
+    });
+  }
 
   return (
     <div className="stack">
       <header className="page-header">
         <div>
           <h1>Administración</h1>
-          <p>Inspectores, secuencias, licencias y catálogos.</p>
+          <p>Personas, códigos de cuadratura, móviles y catálogos.</p>
         </div>
       </header>
 
@@ -426,29 +983,87 @@ export function AdministrationPage() {
       {tab === 'inspectores' ? (
         <section className="panel">
           <div className="admin-toolbar">
-            <p className="admin-hint">
-              La secuencia (turno y móvil) es de la posición. Si entra a mitad de mes, poné la
-              fecha de incorporación: desde ese día ocupa esa posición y hereda el ciclo. Quien
-              estaba deja de ocuparla el día anterior. Después volvé a generar el ciclo.
-            </p>
-            <button
-              type="button"
-              className="btn primary sm"
-              onClick={() => setForm({ ...FORM_VACIO, fecha_desde: hoyIso() })}
-            >
-              Incorporar inspector
-            </button>
+            <div className="cuad-filters admin-filters">
+              <input
+                type="search"
+                className="admin-search"
+                placeholder="Legajo o nombre…"
+                aria-label="Buscar personas"
+                value={filtroTexto}
+                onChange={(e) => setFiltroTexto(e.target.value)}
+              />
+              <FilterPicker
+                aria-label="Sección"
+                summaryLabel="Sección"
+                allLabel="Todas"
+                placeholder="Buscar sección…"
+                options={SECCIONES_SV_SORTED.map((s) => ({ id: s.id, label: s.label }))}
+                values={filtroSeccion}
+                onChange={setFiltroSeccion}
+              />
+              <FilterPicker
+                aria-label="Estado"
+                summaryLabel="Estado"
+                allLabel="Todos"
+                options={[
+                  { id: 'ACTIVO', label: 'Activo' },
+                  { id: 'INACTIVO', label: 'Inactivo' },
+                ]}
+                values={filtroEstado}
+                onChange={setFiltroEstado}
+              />
+              <FilterPicker
+                aria-label="Condición"
+                summaryLabel="Condición"
+                allLabel="Todas"
+                options={[
+                  { id: 'TITULAR', label: 'Titular' },
+                  { id: 'REEMPLAZANTE', label: 'Reemplazante' },
+                  { id: 'PEAJISTA', label: 'Peajista' },
+                ]}
+                values={filtroCondicion}
+                onChange={setFiltroCondicion}
+              />
+            </div>
+            <div className="admin-toolbar-actions">
+              <button
+                type="button"
+                className="btn secondary sm"
+                disabled={!personasFiltradas.length}
+                onClick={exportarPersonas}
+              >
+                Exportar
+              </button>
+              <button
+                type="button"
+                className="btn primary sm"
+                onClick={() =>
+                  setForm({
+                    ...FORM_VACIO,
+                    fecha_desde: hoyIso(),
+                    seccion: seccionVista ?? 'MOVILES',
+                  })
+                }
+              >
+                Incorporar persona
+              </button>
+            </div>
           </div>
           {busy ? <p className="muted">Cargando…</p> : null}
-          {!busy && inspectores.length === 0 ? (
-            <p className="muted">Sin inspectores.</p>
-          ) : (
+          {!busy && personasVista.length === 0 ? (
+            <p className="muted">Sin personas cargadas.</p>
+          ) : null}
+          {!busy && personasVista.length > 0 && personasFiltradas.length === 0 ? (
+            <p className="muted">Ninguna persona coincide con el filtro.</p>
+          ) : null}
+          {personasFiltradas.length > 0 ? (
             <div className="xlsx-scroll">
               <table className="data">
                 <thead>
                   <tr>
                     <th>Legajo</th>
                     <th>Apellido y Nombre</th>
+                    <th>Sección</th>
                     <th>Secuencia</th>
                     <th>Desde</th>
                     <th>Estado</th>
@@ -456,12 +1071,13 @@ export function AdministrationPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {inspectores.map((row) => (
+                  {personasFiltradas.map((row) => (
                     <tr key={row.id}>
                       <td>{row.legajo}</td>
                       <td>
                         <span className="cell-primary">{apellidoYNombre(row)}</span>
                       </td>
+                      <td>{etiquetaSeccion(row.seccion)}</td>
                       <td>{row.posicion_etiqueta || row.posicion_codigo || 'Sin secuencia'}</td>
                       <td>{row.vigencia_desde || '—'}</td>
                       <td>{row.estado}</td>
@@ -470,23 +1086,34 @@ export function AdministrationPage() {
                           type="button"
                           className="btn secondary sm"
                           onClick={() => {
-                            const n = partesNombre(row);
+                            const pos = posiciones.find((p) => p.ocupante_id === row.id);
                             setForm({
                               id: row.id,
-                              apellido: n.apellido,
-                              nombres: n.nombres,
+                              nombre: apellidoYNombre(row),
+                              seccion:
+                                row.seccion === 'EPI' || row.seccion === 'BO'
+                                  ? row.seccion
+                                  : 'MOVILES',
                               legajo: row.legajo,
                               tipo_plantel:
                                 row.tipo_plantel === 'REEMPLAZANTE' ? 'REEMPLAZANTE' : 'TITULAR',
                               fecha_desde: hoyIso(),
-                              posicion_id:
-                                posiciones.find((p) => p.ocupante_id === row.id)?.id || '',
-                              posicion_inicial:
-                                posiciones.find((p) => p.ocupante_id === row.id)?.id || '',
+                              posicion_id: pos?.id || '',
+                              posicion_inicial: pos?.id || '',
+                              secuencia_id: pos ? idSecuencia(pos) : '',
+                              nueva_moviles: [],
+                              nueva_turnos: [],
                             });
                           }}
                         >
                           Modificar
+                        </button>
+                        <button
+                          type="button"
+                          className="btn ghost sm"
+                          onClick={() => void abrirHistorial(row)}
+                        >
+                          Apertura
                         </button>
                         {row.estado === 'ACTIVO' ? (
                           <button
@@ -503,7 +1130,7 @@ export function AdministrationPage() {
                 </tbody>
               </table>
             </div>
-          )}
+          ) : null}
         </section>
       ) : null}
 
@@ -605,69 +1232,126 @@ export function AdministrationPage() {
       {tab === 'licencias' ? (
         <section className="panel">
           <div className="admin-toolbar">
-            <p className="admin-hint">
-              Código y nombre del tipo de licencia. El color se usa en la cuadratura Real.
-            </p>
+            <div className="cuad-filters admin-filters">
+              <input
+                type="search"
+                className="admin-search"
+                placeholder="Código, SAP, horario…"
+                aria-label="Buscar código"
+                value={licFiltroTexto}
+                onChange={(e) => setLicFiltroTexto(e.target.value)}
+              />
+              <FilterPicker
+                aria-label="Tipo"
+                summaryLabel="Tipo"
+                allLabel="Todos"
+                options={[
+                  { id: 'TURNO', label: 'Turno' },
+                  { id: 'FRANCO', label: 'Franco' },
+                  { id: 'AUSENCIA', label: 'Ausentismo' },
+                  { id: 'OTRO', label: 'Otro' },
+                ]}
+                values={licFiltroTipo}
+                onChange={setLicFiltroTipo}
+              />
+              <FilterPicker
+                aria-label="Estado"
+                summaryLabel="Estado"
+                allLabel="Todos"
+                options={[
+                  { id: 'ACTIVO', label: 'Activo' },
+                  { id: 'INACTIVO', label: 'Inactivo' },
+                ]}
+                values={licFiltroEstado}
+                onChange={setLicFiltroEstado}
+              />
+            </div>
             <button
               type="button"
               className="btn primary sm"
               onClick={() =>
                 setLicEdit({
                   codigo: '',
+                  codigo_sap: '',
                   nombre: '',
+                  horario: '',
+                  ambito: ambito ?? 'SEGURIDAD_VIAL',
+                  tipo: 'AUSENCIA',
                   activo: true,
-                  color_fondo: '#3d5348',
-                  color_letra: '#eaf3ec',
+                  color_fondo: '#3f4a42',
+                  color_letra: '#dfe3dc',
                 })
               }
             >
-              Agregar licencia
+              Agregar código
             </button>
           </div>
           {busy ? <p className="muted">Cargando…</p> : null}
+          {codigosVista.length === 0 && !busy ? (
+            <p className="muted">Ningún código coincide con el filtro.</p>
+          ) : (
           <div className="xlsx-scroll">
             <table className="data">
               <thead>
                 <tr>
                   <th>Código</th>
-                  <th>Nombre</th>
+                  <th>SAP</th>
+                  <th>Horario / descripción</th>
+                  <th>Tipo</th>
                   <th>Color</th>
                   <th>Estado</th>
                   <th className="admin-row-actions">Acciones</th>
                 </tr>
               </thead>
               <tbody>
-                {licencias.map((item) => (
+                {codigosVista.map((item) => {
+                  const colores = resolveCodeColors(
+                    item.codigo,
+                    '',
+                    item.color_fondo,
+                    item.color_letra,
+                  );
+                  return (
                   <tr key={item.id} className={item.activo ? undefined : 'is-off'}>
                     <td>
                       <code>{item.codigo}</code>
                     </td>
+                    <td>{item.codigo_sap || '—'}</td>
                     <td>
                       <span
                         className="lic-chip"
                         style={
-                          item.color_fondo || item.color_letra
+                          colores
                             ? {
-                                background: item.color_fondo || undefined,
-                                color: item.color_letra || undefined,
+                                background: colores.bg,
+                                color: colores.fg,
                               }
                             : undefined
                         }
                       >
-                        {item.nombre}
+                        {item.horario || item.nombre}
                       </span>
                     </td>
                     <td>
-                      {item.color_fondo || item.color_letra ? (
+                      {item.tipo === 'TURNO'
+                        ? 'Turno'
+                        : item.tipo === 'FRANCO'
+                          ? 'Franco'
+                          : item.tipo === 'OTRO'
+                            ? 'Otro'
+                            : 'Ausentismo'}
+                    </td>
+                    <td>
+                      {colores ? (
                         <span className="lic-color-pair">
                           <i
                             className="lic-dot"
-                            style={{ background: item.color_fondo || 'transparent' }}
+                            style={{ background: colores.bg }}
                             title="Fondo"
                           />
                           <i
                             className="lic-dot"
-                            style={{ background: item.color_letra || 'transparent' }}
+                            style={{ background: colores.fg }}
                             title="Letra"
                           />
                         </span>
@@ -680,7 +1364,19 @@ export function AdministrationPage() {
                       <button
                         type="button"
                         className="btn secondary sm"
-                        onClick={() => setLicEdit(item)}
+                        onClick={() => {
+                          const c = resolveCodeColors(
+                            item.codigo,
+                            '',
+                            item.color_fondo,
+                            item.color_letra,
+                          );
+                          setLicEdit({
+                            ...item,
+                            color_fondo: c?.bg ?? item.color_fondo,
+                            color_letra: c?.fg ?? item.color_letra,
+                          });
+                        }}
                       >
                         Modificar
                       </button>
@@ -700,16 +1396,116 @@ export function AdministrationPage() {
                       </button>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
+          )}
+        </section>
+      ) : null}
+
+      {tab === 'motivos' ? (
+        <section className="panel">
+          <div className="admin-toolbar">
+            <div className="cuad-filters admin-filters">
+              <input
+                type="search"
+                className="admin-search"
+                placeholder="Buscar motivo…"
+                aria-label="Buscar motivo"
+                value={motFiltroTexto}
+                onChange={(e) => setMotFiltroTexto(e.target.value)}
+              />
+              <FilterPicker
+                aria-label="Estado"
+                summaryLabel="Estado"
+                allLabel="Todos"
+                options={[
+                  { id: 'ACTIVO', label: 'Activo' },
+                  { id: 'INACTIVO', label: 'Inactivo' },
+                ]}
+                values={motFiltroEstado}
+                onChange={setMotFiltroEstado}
+              />
+            </div>
+            <button
+              type="button"
+              className="btn primary sm"
+              onClick={() => setMotEdit({ nombre: '', activo: true })}
+            >
+              Agregar motivo
+            </button>
+          </div>
+          <p className="admin-hint">
+            Lista del Timer (Motivo de la Novedad/Cambio). Lo que cargues acá es lo que se elige
+            en cada fila.
+          </p>
+          {busy ? <p className="muted">Cargando…</p> : null}
+          {motivosVista.length === 0 && !busy ? (
+            <p className="muted">Ningún motivo coincide con el filtro.</p>
+          ) : (
+            <div className="xlsx-scroll">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Motivo</th>
+                    <th>Estado</th>
+                    <th className="admin-row-actions">Acciones</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {motivosVista.map((item) => (
+                    <tr key={item.id} className={item.activo ? undefined : 'is-off'}>
+                      <td>{item.nombre}</td>
+                      <td>{item.activo ? 'Activo' : 'Inactivo'}</td>
+                      <td className="admin-row-actions">
+                        <button
+                          type="button"
+                          className="btn secondary sm"
+                          onClick={() => setMotEdit(item)}
+                        >
+                          Modificar
+                        </button>
+                        <button
+                          type="button"
+                          className="btn ghost sm"
+                          onClick={() => void toggleMotivo(item)}
+                        >
+                          {item.activo ? 'Desactivar' : 'Activar'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn ghost sm"
+                          onClick={() => void eliminarMotivo(item)}
+                        >
+                          Eliminar
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      ) : null}
+
+      {tab === 'apariencia' ? (
+        <section className="panel">
+          <h2 className="admin-section-title">Apariencia</h2>
+          <p className="admin-hint">
+            Color de fondo y de letras de la app. Se guarda en este navegador, por tema.
+          </p>
+          <AppearancePanel />
         </section>
       ) : null}
 
       {tab !== 'inspectores' &&
       tab !== 'licencias' &&
-      tab !== 'moviles' ? (
+      tab !== 'motivos' &&
+      tab !== 'moviles' &&
+      tab !== 'apariencia' ? (
         <section className="panel">
           {busy ? <p className="muted">Cargando…</p> : null}
           {!busy && rows.length === 0 ? (
@@ -751,8 +1547,22 @@ export function AdministrationPage() {
       <Modal
         open={Boolean(form)}
         onClose={() => setForm(null)}
-        title={form?.id ? 'Modificar inspector' : 'Incorporar inspector'}
-        description="No es peajista: es un inspector con una secuencia (posición) para inferir el ciclo."
+        title={
+          form?.id
+            ? `Modificar ${etiquetaRolSeccion(form.seccion)}`
+            : `Incorporar ${etiquetaRolSeccion(form?.seccion)}`
+        }
+        description={
+          form?.seccion === 'MOVILES'
+            ? 'La secuencia es el recorrido (móviles y turnos). La plaza es el asiento de esa secuencia.'
+            : esSeccionPeaje(form?.seccion)
+              ? 'Peajista de la estación elegida en Sección.'
+              : form?.seccion === 'BO'
+                ? 'Operario de Base de Operaciones.'
+                : form?.seccion === 'EPI'
+                  ? 'Persona de E.P.I.'
+                  : 'Elegí la sección y los datos de la persona.'
+        }
         size="md"
         footer={
           <>
@@ -768,22 +1578,29 @@ export function AdministrationPage() {
         {form ? (
           <form id="insp-form" className="admin-form" onSubmit={guardarInspector}>
             <div className="field">
-              <label htmlFor="insp-apellido">Apellido</label>
-              <input
-                id="insp-apellido"
-                value={form.apellido}
-                onChange={(e) => setForm({ ...form, apellido: e.target.value })}
-                required
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="insp-nombres">Nombre</label>
-              <input
-                id="insp-nombres"
-                value={form.nombres}
-                onChange={(e) => setForm({ ...form, nombres: e.target.value })}
-                required
-              />
+              <label htmlFor="insp-seccion">Sección</label>
+              <select
+                id="insp-seccion"
+                value={form.seccion}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    seccion: e.target.value as SeccionSv,
+                    posicion_id: e.target.value === 'MOVILES' ? form.posicion_id : '',
+                    secuencia_id: e.target.value === 'MOVILES' ? form.secuencia_id : '',
+                  })
+                }
+              >
+                {(['Peajes', 'Seguridad Vial'] as const).map((grupo) => (
+                  <optgroup key={grupo} label={grupo}>
+                    {SECCIONES_SV_SORTED.filter((s) => s.grupo === grupo).map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.label}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
             </div>
             <div className="field">
               <label htmlFor="insp-legajo">Legajo</label>
@@ -794,22 +1611,34 @@ export function AdministrationPage() {
                 required
               />
             </div>
-            <div className="field">
-              <label htmlFor="insp-plantel">Plantel</label>
-              <select
-                id="insp-plantel"
-                value={form.tipo_plantel}
-                onChange={(e) =>
-                  setForm({
-                    ...form,
-                    tipo_plantel: e.target.value as InspectorForm['tipo_plantel'],
-                  })
-                }
-              >
-                <option value="TITULAR">Titular</option>
-                <option value="REEMPLAZANTE">Reemplazante</option>
-              </select>
+            <div className="field" style={{ gridColumn: '1 / -1' }}>
+              <label htmlFor="insp-nombre">Apellido y nombre</label>
+              <input
+                id="insp-nombre"
+                value={form.nombre}
+                onChange={(e) => setForm({ ...form, nombre: e.target.value })}
+                placeholder="Acosta, Juan"
+                required
+              />
             </div>
+            {!esSeccionPeaje(form.seccion) && (
+              <div className="field">
+                <label htmlFor="insp-plantel">Condición</label>
+                <select
+                  id="insp-plantel"
+                  value={form.tipo_plantel}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      tipo_plantel: e.target.value as InspectorForm['tipo_plantel'],
+                    })
+                  }
+                >
+                  <option value="TITULAR">Titular</option>
+                  <option value="REEMPLAZANTE">Reemplazante</option>
+                </select>
+              </div>
+            )}
             <div className="field">
               <label htmlFor="insp-desde">Fecha de incorporación</label>
               <input
@@ -820,43 +1649,175 @@ export function AdministrationPage() {
                 required
               />
             </div>
+            {form.seccion === 'MOVILES' ? (
+            <>
             <div className="field" style={{ gridColumn: '1 / -1' }}>
-              <label htmlFor="insp-pos">Secuencia (posición)</label>
-              <select
-                id="insp-pos"
-                value={form.posicion_id}
-                onChange={(e) => setForm({ ...form, posicion_id: e.target.value })}
-                required
-              >
-                <option value="">Elegí…</option>
-                {posiciones.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.codigo}
-                    {p.ocupante ? ` · ocupa ${p.ocupante}` : ' · vacante'}
-                    {` · ${p.moviles} / ${p.turnos}`}
-                  </option>
+              <span className="field-label">Secuencia</span>
+              <div className="seq-choices" role="listbox" aria-label="Secuencia">
+                {opcionesSecuencia.map((o) => (
+                  <button
+                    key={o.id}
+                    type="button"
+                    role="option"
+                    aria-selected={form.secuencia_id === o.id}
+                    className={`seq-choice${form.secuencia_id === o.id ? ' is-on' : ''}${
+                      o.action ? ' is-action' : ''
+                    }`}
+                    onClick={() => elegirSecuencia(o.id)}
+                  >
+                    {o.label}
+                  </button>
                 ))}
-              </select>
-              {posicionElegida?.ocupante && posicionElegida.ocupante_id !== form.id ? (
-                <p className="hint">
-                  {posicionElegida.ocupante} deja esa secuencia el día anterior a la
-                  incorporación.
-                </p>
+              </div>
+              {form.secuencia_id === '__new__' ? (
+                <div className="seq-builder">
+                  <p className="hint" style={{ margin: 0 }}>
+                    Clic en orden. Preview:{' '}
+                    {[(form.nueva_moviles ?? []).join('→') || '—', (form.nueva_turnos ?? []).join('→') || '—'].join(' / ')}
+                  </p>
+                  <div className="seq-builder-row">
+                    <span className="muted">Móviles</span>
+                    {moviles
+                      .filter((m) => m.estado === 'ACTIVO')
+                      .map((m) => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          className={`btn sm${(form.nueva_moviles ?? []).includes(m.numero) ? ' primary' : ' secondary'}`}
+                          onClick={() => toggleNuevoMovil(m.numero)}
+                        >
+                          {m.numero}
+                          {(form.nueva_moviles ?? []).includes(m.numero)
+                            ? ` · ${(form.nueva_moviles ?? []).indexOf(m.numero) + 1}`
+                            : ''}
+                        </button>
+                      ))}
+                  </div>
+                  <div className="seq-builder-row">
+                    <span className="muted">Turnos</span>
+                    {TURNOS_SEQ.map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        className={`btn sm${(form.nueva_turnos ?? []).includes(t) ? ' primary' : ' secondary'}`}
+                        onClick={() => toggleNuevoTurno(t)}
+                      >
+                        {t}
+                        {(form.nueva_turnos ?? []).includes(t)
+                          ? ` · ${(form.nueva_turnos ?? []).indexOf(t) + 1}`
+                          : ''}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    className="btn primary sm"
+                    disabled={
+                      busy ||
+                      !(form.nueva_moviles ?? []).length ||
+                      !(form.nueva_turnos ?? []).length
+                    }
+                    onClick={() => void crearSecuenciaNueva()}
+                  >
+                    Crear secuencia
+                  </button>
+                </div>
               ) : (
                 <p className="hint">
-                  A mitad de mes: el ciclo de esa posición sigue; el inspector nuevo entra desde
-                  la fecha. Inferí de nuevo para verlo en Ideal.
+                  El recorrido de móviles y turnos. «Nueva secuencia» arma uno distinto.
                 </p>
               )}
             </div>
+            {form.secuencia_id && form.secuencia_id !== '__new__' ? (
+            <div className="field" style={{ gridColumn: '1 / -1' }}>
+              <span className="field-label">Plaza</span>
+              <div className="seq-choices is-scroll" role="listbox" aria-label="Plaza">
+                {opcionesPlaza.map((o) => (
+                  <button
+                    key={o.id}
+                    type="button"
+                    role="option"
+                    aria-selected={form.posicion_id === o.id}
+                    className={`seq-choice${form.posicion_id === o.id ? ' is-on' : ''}${
+                      o.action ? ' is-action' : ''
+                    }`}
+                    onClick={() => void elegirPlaza(o.id)}
+                  >
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+              {posicionElegida ? (
+                <p className="hint">
+                  {posicionElegida.ocupante && posicionElegida.ocupante_id !== form.id
+                    ? `Hoy la usa ${posicionElegida.ocupante}; al guardar se cierra el día anterior.`
+                    : 'Plaza libre: entra sin sacar a nadie.'}
+                </p>
+              ) : (
+                <p className="hint">
+                  Asiento de esa secuencia. «Nueva plaza libre» crea uno vacío.
+                </p>
+              )}
+            </div>
+            ) : null}
+            </>
+            ) : (
+              <p className="hint" style={{ gridColumn: '1 / -1' }}>
+                E.P.I. y Base de Operaciones todavía no usan secuencia de móviles.
+              </p>
+            )}
           </form>
+        ) : null}
+      </Modal>
+
+      <Modal
+        open={Boolean(historial)}
+        onClose={() => setHistorial(null)}
+        title={historial ? `Apertura · ${historial.nombre}` : 'Apertura'}
+        description="Dónde estuvo. Si cambia de sección o de secuencia, el período anterior se cierra y no se pisa."
+        size="md"
+        footer={
+          <button type="button" className="btn secondary" onClick={() => setHistorial(null)}>
+            Cerrar
+          </button>
+        }
+      >
+        {historial && historial.filas.length === 0 ? (
+          <p className="muted">Todavía no hay períodos cargados.</p>
+        ) : null}
+        {historial && historial.filas.length > 0 ? (
+          <div className="xlsx-scroll">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Desde</th>
+                  <th>Hasta</th>
+                  <th>Dónde</th>
+                  <th>Motivo</th>
+                </tr>
+              </thead>
+              <tbody>
+                {historial.filas.map((f, i) => (
+                  <tr key={`${f.origen}-${f.fecha_desde}-${i}`}>
+                    <td>{isoToDmy(f.fecha_desde)}</td>
+                    <td>{f.fecha_hasta ? isoToDmy(f.fecha_hasta) : 'Vigente'}</td>
+                    <td>
+                      {etiquetaSeccion(f.seccion)}
+                      {f.posicion_etiqueta ? ` · ${f.posicion_etiqueta}` : ''}
+                    </td>
+                    <td>{f.motivo || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         ) : null}
       </Modal>
 
       <Modal
         open={Boolean(licEdit)}
         onClose={() => setLicEdit(null)}
-        title={licEdit?.id ? 'Modificar licencia' : 'Agregar licencia'}
+        title={licEdit?.id ? 'Modificar código' : 'Agregar código'}
         size="sm"
         footer={
           <>
@@ -872,38 +1833,81 @@ export function AdministrationPage() {
         {licEdit ? (
           <form id="lic-form" className="stack" onSubmit={guardarLicencia}>
             <div className="field">
-              <label htmlFor="lic-codigo">Código</label>
+              <label htmlFor="lic-codigo">Código interno</label>
               <input
                 id="lic-codigo"
                 value={licEdit.codigo ?? ''}
                 onChange={(e) =>
                   setLicEdit({ ...licEdit, codigo: e.target.value.toUpperCase() })
                 }
-                placeholder="CASAMIENTO"
+                placeholder="AC"
                 required
               />
             </div>
             <div className="field">
-              <label htmlFor="lic-nombre">Nombre</label>
+              <label htmlFor="lic-sap">Código SAP</label>
               <input
-                id="lic-nombre"
-                value={licEdit.nombre ?? ''}
-                onChange={(e) => setLicEdit({ ...licEdit, nombre: e.target.value })}
-                placeholder="Licencia por casamiento"
+                id="lic-sap"
+                value={licEdit.codigo_sap ?? ''}
+                onChange={(e) => setLicEdit({ ...licEdit, codigo_sap: e.target.value })}
+                placeholder="02AC"
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="lic-horario">Horario / descripción</label>
+              <input
+                id="lic-horario"
+                value={licEdit.horario ?? licEdit.nombre ?? ''}
+                onChange={(e) =>
+                  setLicEdit({
+                    ...licEdit,
+                    horario: e.target.value,
+                    nombre: e.target.value,
+                  })
+                }
+                placeholder="Accidente a cargo empresa"
                 required
               />
             </div>
+            <div className="field">
+              <label htmlFor="lic-tipo">Tipo</label>
+              <select
+                id="lic-tipo"
+                value={licEdit.tipo || 'AUSENCIA'}
+                onChange={(e) => setLicEdit({ ...licEdit, tipo: e.target.value })}
+              >
+                <option value="TURNO">Turno</option>
+                <option value="AUSENCIA">Ausentismo</option>
+                <option value="FRANCO">Franco</option>
+                <option value="OTRO">Otro</option>
+              </select>
+            </div>
             <div className="admin-color-row">
+              {(() => {
+                const c = resolveCodeColors(
+                  licEdit.codigo,
+                  '',
+                  licEdit.color_fondo,
+                  licEdit.color_letra,
+                );
+                const fondo = c?.bg ?? '#3f4a42';
+                const letra = c?.fg ?? '#dfe3dc';
+                return (
+                  <>
               <div className="field">
                 <label htmlFor="lic-fondo">Color de fondo</label>
                 <div className="admin-color-ctrl">
                   <input
                     id="lic-fondo"
                     type="color"
-                    value={licEdit.color_fondo || '#3d5348'}
-                    onChange={(e) => setLicEdit({ ...licEdit, color_fondo: e.target.value })}
+                    value={fondo}
+                    onChange={(e) => {
+                      const hex = e.target.value.toUpperCase();
+                      setLicEdit({ ...licEdit, color_fondo: hex });
+                      aplicarColorCodigo(licEdit.codigo, { bg: hex });
+                    }}
                   />
-                  <code>{licEdit.color_fondo || '—'}</code>
+                  <code>{fondo}</code>
                 </div>
               </div>
               <div className="field">
@@ -912,25 +1916,76 @@ export function AdministrationPage() {
                   <input
                     id="lic-letra"
                     type="color"
-                    value={licEdit.color_letra || '#eaf3ec'}
-                    onChange={(e) => setLicEdit({ ...licEdit, color_letra: e.target.value })}
+                    value={letra}
+                    onChange={(e) => {
+                      const hex = e.target.value.toUpperCase();
+                      setLicEdit({ ...licEdit, color_letra: hex });
+                      aplicarColorCodigo(licEdit.codigo, { fg: hex });
+                    }}
                   />
-                  <code>{licEdit.color_letra || '—'}</code>
+                  <code>{letra}</code>
                 </div>
               </div>
+                  </>
+                );
+              })()}
             </div>
             <p className="admin-hint" style={{ margin: 0 }}>
               Vista previa:{' '}
               <span
                 className="lic-chip"
-                style={{
-                  background: licEdit.color_fondo || undefined,
-                  color: licEdit.color_letra || undefined,
-                }}
+                style={(() => {
+                  const c = resolveCodeColors(
+                    licEdit.codigo,
+                    '',
+                    licEdit.color_fondo,
+                    licEdit.color_letra,
+                  );
+                  return c
+                    ? { background: c.bg, color: c.fg }
+                    : undefined;
+                })()}
               >
-                {licEdit.nombre || licEdit.codigo || 'Licencia'}
+                {licEdit.codigo || 'Código'}{' '}
+                {licEdit.horario || licEdit.nombre
+                  ? `· ${licEdit.horario || licEdit.nombre}`
+                  : ''}
               </span>
             </p>
+          </form>
+        ) : null}
+      </Modal>
+
+      <Modal
+        open={Boolean(motEdit)}
+        onClose={() => setMotEdit(null)}
+        title={motEdit?.id ? 'Modificar motivo' : 'Agregar motivo'}
+        description="Texto que aparece en el validar del Timer."
+        size="sm"
+        footer={
+          <>
+            <button type="button" className="btn secondary" onClick={() => setMotEdit(null)}>
+              Cancelar
+            </button>
+            <button type="submit" form="mot-form" className="btn primary" disabled={busy}>
+              Guardar
+            </button>
+          </>
+        }
+      >
+        {motEdit ? (
+          <form id="mot-form" className="stack" onSubmit={guardarMotivo}>
+            <div className="field">
+              <label htmlFor="mot-nombre">Motivo</label>
+              <input
+                id="mot-nombre"
+                value={motEdit.nombre ?? ''}
+                onChange={(e) => setMotEdit({ ...motEdit, nombre: e.target.value })}
+                placeholder="Ej. Congestión de Tránsito"
+                required
+                minLength={3}
+              />
+            </div>
           </form>
         ) : null}
       </Modal>

@@ -183,6 +183,7 @@ describe('desdoble por superposición', () => {
     ];
     const { days: out, desdobles } = resolverSuperposiciones(days, {
       cualquierMovilDelTurno: true,
+      permitirMovil4: true,
     });
 
     expect(desdobles).toHaveLength(1);
@@ -191,6 +192,27 @@ describe('desdoble por superposición', () => {
     expect(nombresEn(out, '2026-09-01', 1, 'M')).toHaveLength(3);
     expect(nombresEn(out, '2026-09-01', 3, 'M')).toHaveLength(1);
     expect(nombresEn(out, '2026-09-01', 5, 'M')).toHaveLength(1);
+  });
+
+  it('con permitirCruzarFranja usa otro horario si la franja propia está llena', () => {
+    const days = [
+      dia('A', '2026-09-01', 'M', 1),
+      dia('B', '2026-09-01', 'M', 1),
+      dia('C', '2026-09-01', 'M', 1),
+      dia('D', '2026-09-01', 'M', 2),
+      dia('E', '2026-09-01', 'M', 2),
+      dia('F', '2026-09-01', 'M', 4),
+      dia('G', '2026-09-01', 'M', 4),
+      dia('H', '2026-09-01', 'M', 3),
+    ];
+    const { days: out, desdobles } = resolverSuperposiciones(days, {
+      cualquierMovilDelTurno: true,
+      permitirMovil4: true,
+      permitirCruzarFranja: true,
+    });
+    expect(desdobles[0].estado).toBe('RESUELTO');
+    expect([3, 5]).toContain(desdobles[0].movilDestino);
+    expect(nombresEn(out, '2026-09-01', 1, 'M')).toHaveLength(2);
   });
 
   it('ningún desdoble resuelto cruza de franja horaria', () => {

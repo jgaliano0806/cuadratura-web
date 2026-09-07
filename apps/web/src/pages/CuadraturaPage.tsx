@@ -4,18 +4,35 @@
  * Real  = esa ideal más las situaciones registradas.
  * Si todavía no hay cambios, la real muestra el ciclo: no hay pantalla vacía.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type MouseEvent } from 'react';
+import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type MouseEvent } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../lib/api';
-import { DateField, DateRangePresets, EmptyState, FilterPicker, PeoplePicker, useToast } from '../components/ui';
+import { ConfirmDialog, DateField, DateRangePresets, EmptyState, ExcelMenu, FilterPicker, Modal, PeoplePicker, SearchSelect, useToast } from '../components/ui';
 import type { Person } from '../components/ui';
 import { isoToDmy } from '../lib/dateRange';
 import {
   ShiftCell,
   DayDetailPanel,
+  OcupacionBoard,
+  OcupacionPackProvider,
+  TimerBoard,
   type Licencia,
 } from '../components/schedule';
-import { apellidoYNombre, etiquetaPersona, legajoMostrar } from '../lib/personLabel';
+import { PlantelSwitch } from '../components/PlantelSwitch';
+import {
+  etiquetaPersonaRol,
+  etiquetaPersonas,
+  etiquetaSeccion,
+  parseAmbito,
+  parsePlanteles,
+  plantelListo,
+  plantelPorDefecto,
+  PLANTELES,
+  seccionesDePlanteles,
+  type AmbitoId,
+  type PlantelId,
+} from '../lib/plantel';
+import { apellidoYNombre, legajoMostrar } from '../lib/personLabel';
 import { useGridColWidths } from '../lib/useGridColWidths';
 import {
   addIsoDays,
@@ -30,9 +47,12 @@ import {
   shiftMonth,
   toDateOnly,
   weekdayAbbrev,
+  cellShortLabel,
   type BoardResponse,
   type DayRow,
 } from '../lib/scheduleUtils';
+import { useBoxTheme } from '../lib/boxTheme';
+import { useCuadPaneles } from '../lib/cuadPaneles';
 
 type Capa = 'PLANIFICADA' | 'REAL';
 type Vista = 'plan' | 'real';
@@ -46,32 +66,37 @@ type Version = {
 
 type Inspector = Person;
 
-type TipoCambio = 'VACACION' | 'LICENCIA' | 'ENFERMEDAD' | 'FERIADO' | 'TURNO_MOVIL';
+type TipoCambio = 'CODIGO' | 'ENROQUE';
+
+type AlcanceIdeal = {
+  kind: 'seleccion' | 'filas' | 'columnas';
+  inspectorIds: string[] | null;
+  dateFrom: string;
+  dateTo: string;
+  mensaje: string;
+};
 
 const TIPOS_CAMBIO: Array<{ valor: TipoCambio; etiqueta: string }> = [
-  { valor: 'VACACION', etiqueta: 'Vacaciones' },
-  { valor: 'LICENCIA', etiqueta: 'Licencia' },
-  { valor: 'ENFERMEDAD', etiqueta: 'Licencia por enfermedad' },
-  { valor: 'FERIADO', etiqueta: 'Franco' },
-  { valor: 'TURNO_MOVIL', etiqueta: 'Cambio de turno / móvil' },
+  { valor: 'CODIGO', etiqueta: 'Código' },
+  { valor: 'ENROQUE', etiqueta: 'Enroque' },
 ];
 
-const LEYENDA = [
-  { cls: 'sap-cell-manana', txt: 'Mañana' },
-  { cls: 'sap-cell-tarde', txt: 'Tarde' },
-  { cls: 'sap-cell-noche', txt: 'Noche' },
-  { cls: 'sap-cell-franco', txt: 'Franco' },
-  { cls: 'sap-cell-vacacion', txt: 'Vacaciones' },
-  { cls: 'sap-cell-enfermedad', txt: 'Enfermedad' },
-] as const;
+const CONSOLA_W_KEY = { plan: 'cuad-consola-w-plan', real: 'cuad-consola-w-real' } as const;
+const CONSOLA_W_MIN = 220;
+const CONSOLA_W_MAX = 560;
+const CONSOLA_W_DEF = { plan: 248, real: 320 };
 
-const DOCK_MIN = 108;
-const DOCK_MAX = 420;
-const DOCK_DEFAULT = 200;
-
-function clampDock(n: number) {
-  return Math.round(Math.min(DOCK_MAX, Math.max(DOCK_MIN, n)));
+function clampConsolaW(n: number, cap = CONSOLA_W_MAX) {
+  return Math.round(Math.min(cap, Math.max(CONSOLA_W_MIN, n)));
 }
+
+function leerConsolaW(capa: Vista) {
+  const propio = Number(localStorage.getItem(CONSOLA_W_KEY[capa]));
+  if (Number.isFinite(propio)) return clampConsolaW(propio);
+  const viejo = Number(localStorage.getItem('cuad-consola-w'));
+  return Number.isFinite(viejo) ? clampConsolaW(viejo) : CONSOLA_W_DEF[capa];
+}
+
 
 /** Superposición de 3 que no se pudo resolver sin cambiar el horario de entrada. */
 type CasoSinDestino = {
@@ -183,37 +208,26 @@ type Seleccion = {
   dateTo: string;
 };
 
-function tipoDesdeCelda(
-  cell: DayRow,
-  licencias: Licencia[],
-): {
-  tipo: TipoCambio;
-  licenciaId: string;
-  turno: '' | 'M' | 'T' | 'N';
-  movil: string;
-} {
-  const lic = cell.licencia_codigo
-    ? licencias.find((l) => l.codigo === cell.licencia_codigo)
-    : undefined;
-  if (lic) {
-    return { tipo: 'LICENCIA', licenciaId: lic.id, turno: '', movil: '' };
+function parseCodigo(valor: string): {
+  shift?: 'M' | 'T' | 'N';
+  mobile?: number;
+  kind?: 'VACACION' | 'LICENCIA' | 'FERIADO' | 'ENFERMEDAD';
+  licenciaId?: string;
+} | null {
+  if (!valor) return null;
+  if (valor.startsWith('TM:')) {
+    const rest = valor.slice(3);
+    const shift = rest[0];
+    const mobile = Number(rest.slice(1));
+    if (shift !== 'M' && shift !== 'T' && shift !== 'N') return null;
+    if (!Number.isFinite(mobile) || mobile < 1) return null;
+    return { shift, mobile };
   }
-  const letra = cell.turno || cell.codigo[0];
-  if (letra === 'M' || letra === 'T' || letra === 'N') {
-    return {
-      tipo: 'TURNO_MOVIL',
-      licenciaId: '',
-      turno: letra,
-      movil: cell.movil != null ? String(cell.movil) : '',
-    };
-  }
-  if (cell.tipo_dia === 'VACACION' || cell.codigo === 'V') {
-    return { tipo: 'VACACION', licenciaId: '', turno: '', movil: '' };
-  }
-  if (cell.tipo_dia === 'ENFERMEDAD' || cell.codigo === 'EF') {
-    return { tipo: 'ENFERMEDAD', licenciaId: '', turno: '', movil: '' };
-  }
-  return { tipo: 'FERIADO', licenciaId: '', turno: '', movil: '' };
+  if (valor === 'A:FERIADO') return { kind: 'FERIADO' };
+  if (valor === 'A:VACACION') return { kind: 'VACACION' };
+  if (valor === 'A:ENFERMEDAD') return { kind: 'ENFERMEDAD' };
+  if (valor.startsWith('L:')) return { kind: 'LICENCIA', licenciaId: valor.slice(2) };
+  return null;
 }
 
 function diaPasa(d: DayRow, f: FiltrosGrilla): boolean {
@@ -221,7 +235,14 @@ function diaPasa(d: DayRow, f: FiltrosGrilla): boolean {
     return false;
   }
   if (f.turnos.length && (!d.turno || !f.turnos.includes(d.turno))) return false;
-  if (f.licencias.length && !f.licencias.includes(d.licencia_codigo || '')) return false;
+  if (f.licencias.length) {
+    const codigos = new Set<string>();
+    if (d.licencia_codigo) codigos.add(d.licencia_codigo);
+    if (d.codigo) codigos.add(d.codigo);
+    const corto = cellShortLabel(d);
+    if (corto) codigos.add(corto);
+    if (![...codigos].some((c) => f.licencias.includes(c))) return false;
+  }
   return true;
 }
 
@@ -233,7 +254,7 @@ function agrupar(
 ) {
   const mapa = new Map<
     string,
-    { nombre: string; legajo: string; dias: Map<string, DayRow> }
+    { nombre: string; legajo: string; seccion: string; dias: Map<string, DayRow> }
   >();
   const cruza = Boolean(filtros.licencias.length || filtros.moviles.length || filtros.turnos.length);
   for (const d of board?.days ?? []) {
@@ -241,9 +262,11 @@ function agrupar(
     if (catalogo && !catalogo.has(d.inspector_id)) continue;
     const k = d.inspector_id;
     const fuente = personas?.get(k) ?? d;
+    const seccionId = personas?.get(k)?.seccion || 'MOVILES';
     const entrada = mapa.get(k) ?? {
       nombre: apellidoYNombre(fuente),
       legajo: legajoMostrar(fuente.legajo),
+      seccion: etiquetaSeccion(seccionId),
       dias: new Map<string, DayRow>(),
     };
     entrada.dias.set(d.fecha_operativa, d);
@@ -256,7 +279,12 @@ function agrupar(
       if (cruza && ![...r.dias.values()].some((d) => diaPasa(d, filtros))) return false;
       return true;
     })
-    .sort((a, b) => a.nombre.localeCompare(b.nombre, 'es') || a.legajo.localeCompare(b.legajo));
+    .sort(
+      (a, b) =>
+        a.seccion.localeCompare(b.seccion, 'es') ||
+        a.nombre.localeCompare(b.nombre, 'es') ||
+        a.legajo.localeCompare(b.legajo),
+    );
 }
 
 function siguienteCelda(
@@ -303,16 +331,80 @@ function ColResizer({ onDrag }: { onDrag: (e: MouseEvent<HTMLSpanElement>) => vo
   );
 }
 
+function claveDia(d: DayRow) {
+  return `${rowKey(d)}|${toDateOnly(d.fecha_operativa)}`;
+}
+
+function celdaHueco(
+  inspectorId: string,
+  fecha: string,
+  extra?: { inspector?: string | null; legajo?: string | null },
+): DayRow {
+  return {
+    fecha_operativa: fecha,
+    tipo_dia: '',
+    codigo: '',
+    turno: null,
+    movil: null,
+    inspector: extra?.inspector ?? null,
+    inspector_id: inspectorId,
+    legajo: extra?.legajo ?? null,
+    posicion_codigo: '',
+  };
+}
+
+function celdasDelRango(
+  board: BoardResponse | null,
+  inspectorId: string | null | undefined,
+  from: string,
+  to: string,
+  extra?: { inspector?: string | null; legajo?: string | null },
+): DayRow[] {
+  if (!inspectorId || !from || !to) return [];
+  const mapa = new Map<string, DayRow>();
+  for (const d of board?.days ?? []) {
+    if (d.inspector_id !== inspectorId) continue;
+    const f = toDateOnly(d.fecha_operativa);
+    if (f >= from && f <= to) mapa.set(f, d);
+  }
+  return eachDate(from, to).map(
+    (f) => mapa.get(f) ?? celdaHueco(inspectorId, f, extra),
+  );
+}
+
+function esDiff(celda: DayRow, otra: DayRow | undefined): boolean {
+  return Boolean(
+    otra && (otra.codigo !== celda.codigo || otra.tipo_dia !== celda.tipo_dia),
+  );
+}
+
 function contarDiffs(plan: BoardResponse | null, real: BoardResponse | null): number {
   if (!plan || !real) return 0;
   const mapa = new Map<string, DayRow>();
-  for (const d of plan.days) mapa.set(`${rowKey(d)}|${d.fecha_operativa}`, d);
+  for (const d of plan.days) mapa.set(claveDia(d), d);
   let n = 0;
   for (const d of real.days) {
-    const otra = mapa.get(`${rowKey(d)}|${d.fecha_operativa}`);
-    if (otra && (otra.codigo !== d.codigo || otra.tipo_dia !== d.tipo_dia)) n += 1;
+    const otra = mapa.get(claveDia(d));
+    if (otra && esDiff(d, otra)) n += 1;
   }
   return n;
+}
+
+/** Real = Ideal + novedades. Si un día no tiene cambio, se ve el ciclo. */
+function fusionarReal(
+  plan: BoardResponse | null,
+  real: BoardResponse | null,
+): BoardResponse | null {
+  if (!real?.days?.length) return plan;
+  if (!plan?.days?.length) return real;
+  const overlay = new Map<string, DayRow>();
+  for (const d of real.days) overlay.set(claveDia(d), d);
+  const days = plan.days.map((d) => overlay.get(claveDia(d)) ?? d);
+  const vistos = new Set(days.map(claveDia));
+  for (const d of real.days) {
+    if (!vistos.has(claveDia(d))) days.push(d);
+  }
+  return { ...real, days };
 }
 
 function Grilla({
@@ -322,11 +414,14 @@ function Grilla({
   filtros,
   catalogo,
   personas,
+  mostrarSeccion,
   cargando,
   vacio,
   seleccion,
   contra,
+  soloCambios,
   onSelect,
+  cubiertoHasta,
 }: {
   board: BoardResponse | null;
   fechas: string[];
@@ -334,11 +429,15 @@ function Grilla({
   filtros: FiltrosGrilla;
   catalogo?: Set<string>;
   personas?: Map<string, Person>;
+  mostrarSeccion?: boolean;
   cargando: boolean;
   vacio: string;
   seleccion: Seleccion | null;
   contra: BoardResponse | null;
+  soloCambios?: boolean;
   onSelect: (cell: DayRow, date: string, opts?: { extend?: boolean }) => void;
+  /** Último día con ciclo generado; fechas posteriores se marcan como pendientes. */
+  cubiertoHasta?: string;
 }) {
   const filas = useMemo(
     () => agrupar(board, filtros, catalogo, personas),
@@ -356,7 +455,55 @@ function Grilla({
     }
     return m;
   }, [contra]);
+  const filasVista = useMemo(() => {
+    if (!soloCambios) return filas;
+    return filas.filter((fila) =>
+      fechas.some((f) => {
+        const celda = fila.dias.get(f);
+        if (!celda) return false;
+        return esDiff(celda, contraMap.get(`${fila.key}|${f}`));
+      }),
+    );
+  }, [filas, fechas, contraMap, soloCambios]);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [cajaW, setCajaW] = useState(0);
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const medir = () => setCajaW(el.clientWidth);
+    medir();
+    const ro = new ResizeObserver(medir);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [filasVista.length, fechas.length]);
+
+  const vis = useMemo(() => {
+    const legMin = 56;
+    const nameMin = 96;
+    const seccionMin = mostrarSeccion ? 64 : 0;
+    const dayMin = 32;
+    if (cajaW < 120) {
+      return {
+        legajo: cols.legajo,
+        name: cols.name,
+        seccion: mostrarSeccion ? cols.seccion : 0,
+        day: cols.day,
+      };
+    }
+    const frozenCap = Math.max(legMin + nameMin + seccionMin, Math.floor(cajaW * 0.48));
+    const seccion = mostrarSeccion
+      ? Math.min(cols.seccion, Math.max(seccionMin, Math.round(frozenCap * 0.22)))
+      : 0;
+    const restoFrozen = frozenCap - seccion;
+    const legajo = Math.min(cols.legajo, Math.max(legMin, Math.round(restoFrozen * 0.3)));
+    const name = Math.min(cols.name, Math.max(nameMin, restoFrozen - legajo));
+    const rest = Math.max(dayMin, cajaW - legajo - name - seccion);
+    const n = Math.max(1, fechas.length);
+    const dayFit = Math.floor(rest / n);
+    const day = Math.min(cols.day, Math.max(dayMin, dayFit));
+    return { legajo, name, seccion, day };
+  }, [cajaW, cols, fechas.length, mostrarSeccion]);
 
   useEffect(() => {
     if (!seleccion) return;
@@ -373,7 +520,7 @@ function Grilla({
   }, [seleccion]);
 
   useEffect(() => {
-    if (!seleccion || !filas.length || !fechas.length) return;
+    if (!seleccion || !filasVista.length || !fechas.length) return;
     // El evento de window es el del DOM, no el sintético de React: el import de
     // arriba trae `KeyboardEvent` de React y taparía al global.
     const onKey = (e: globalThis.KeyboardEvent) => {
@@ -382,14 +529,14 @@ function Grilla({
       const inGrid =
         e.target instanceof HTMLElement &&
         Boolean(e.target.closest('.sap-grid-scroll, .sap-cell'));
-      const ri = filas.findIndex((f) => f.key === rowKey(seleccion.cell));
+      const ri = filasVista.findIndex((f) => f.key === rowKey(seleccion.cell));
       const ci = fechas.indexOf(seleccion.focus);
       if (ri < 0 || ci < 0) return;
       const jump = e.ctrlKey || e.metaKey;
       let next: { cell: DayRow; date: string } | null = null;
       if (e.key === 'ArrowLeft' || (e.key === 'Tab' && e.shiftKey && inGrid)) {
         next = siguienteCelda(
-          filas,
+          filasVista,
           fechas,
           ri,
           ci,
@@ -401,7 +548,7 @@ function Grilla({
         );
       } else if (e.key === 'ArrowRight' || (e.key === 'Tab' && inGrid)) {
         next = siguienteCelda(
-          filas,
+          filasVista,
           fechas,
           ri,
           ci,
@@ -412,13 +559,13 @@ function Grilla({
           e.key === 'Tab' ? false : jump,
         );
       } else if (e.key === 'ArrowUp') {
-        next = siguienteCelda(filas, fechas, ri, ci, -1, 0, filtros, cruza, jump);
+        next = siguienteCelda(filasVista, fechas, ri, ci, -1, 0, filtros, cruza, jump);
       } else if (e.key === 'ArrowDown') {
-        next = siguienteCelda(filas, fechas, ri, ci, 1, 0, filtros, cruza, jump);
+        next = siguienteCelda(filasVista, fechas, ri, ci, 1, 0, filtros, cruza, jump);
       } else if (e.key === 'Home') {
-        next = siguienteCelda(filas, fechas, ri, ci, 0, -1, filtros, cruza, true);
+        next = siguienteCelda(filasVista, fechas, ri, ci, 0, -1, filtros, cruza, true);
       } else if (e.key === 'End') {
-        next = siguienteCelda(filas, fechas, ri, ci, 0, 1, filtros, cruza, true);
+        next = siguienteCelda(filasVista, fechas, ri, ci, 0, 1, filtros, cruza, true);
       } else {
         return;
       }
@@ -431,9 +578,11 @@ function Grilla({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [seleccion, filas, fechas, filtros, cruza, onSelect]);
+  }, [seleccion, filasVista, fechas, filtros, cruza, onSelect]);
 
-  if (cargando) {
+  // Solo skeleton en la primera carga. Si ya hay tablero, se mantiene visible
+  // mientras llega el nuevo rango (evita el parpadeo al filtrar fechas).
+  if (cargando && !board) {
     return (
       <div className="cuad-skel" aria-hidden>
         {Array.from({ length: 7 }).map((_, i) => (
@@ -452,16 +601,30 @@ function Grilla({
   if (!board || filas.length === 0) {
     return <EmptyState compact title={vacio} />;
   }
+  if (filasVista.length === 0) {
+    return (
+      <EmptyState
+        compact
+        title="Nadie cambió respecto de la Ideal"
+        description="Mostrá la cuadratura completa o ampliá el período."
+      />
+    );
+  }
 
   return (
-    <div className="sap-grid-scroll" ref={scrollRef}>
+    <div
+      className={`sap-grid-scroll${cargando ? ' is-refreshing' : ''}`}
+      ref={scrollRef}
+      aria-busy={cargando || undefined}
+    >
       <table
-        className="sap-grid"
+        className={`sap-grid${cruza ? ' is-filtering' : ''}${mostrarSeccion ? ' has-seccion' : ''}`}
         style={
           {
-            '--sap-legajo-w': `${cols.legajo}px`,
-            '--sap-name-w': `${cols.name}px`,
-            '--sap-day-w': `${cols.day}px`,
+            '--sap-legajo-w': `${vis.legajo}px`,
+            '--sap-name-w': `${vis.name}px`,
+            '--sap-seccion-w': `${vis.seccion}px`,
+            '--sap-day-w': `${vis.day}px`,
           } as CSSProperties
         }
       >
@@ -473,6 +636,11 @@ function Grilla({
             <th className="sap-sticky-name">
               <ColResizer onDrag={(e) => begin('name', e)} />
             </th>
+            {mostrarSeccion ? (
+              <th className="sap-sticky-seccion">
+                <ColResizer onDrag={(e) => begin('seccion', e)} />
+              </th>
+            ) : null}
             {meses.map((m) => (
               <th key={m.key} colSpan={m.span} className="sap-month-cell">
                 <span className="sap-month-label">{m.label}</span>
@@ -488,6 +656,12 @@ function Grilla({
               Apellido y Nombre
               <ColResizer onDrag={(e) => begin('name', e)} />
             </th>
+            {mostrarSeccion ? (
+              <th className="sap-sticky-seccion">
+                Sección
+                <ColResizer onDrag={(e) => begin('seccion', e)} />
+              </th>
+            ) : null}
             {fechas.map((f) => (
               <th
                 key={f}
@@ -504,28 +678,21 @@ function Grilla({
           </tr>
         </thead>
         <tbody>
-          {filas.map((fila) => (
+          {filasVista.map((fila) => (
             <tr key={fila.key}>
               <th className="sap-sticky-legajo">{fila.legajo}</th>
               <th className="sap-sticky-name" scope="row" title={fila.nombre}>
                 {fila.nombre}
               </th>
+              {mostrarSeccion ? (
+                <th className="sap-sticky-seccion" title={fila.seccion}>
+                  {fila.seccion}
+                </th>
+              ) : null}
               {fechas.map((f) => {
                 const celda = fila.dias.get(f);
                 const oculta = Boolean(celda && cruza && !diaPasa(celda, filtros));
-                if (!celda || oculta) {
-                  return (
-                    <td
-                      key={f}
-                      className={`sap-empty${esFinDeSemana(f) ? ' is-weekend' : ''}`}
-                    />
-                  );
-                }
-                const otra = contraMap.get(`${fila.key}|${f}`);
-                const differs = Boolean(
-                  otra &&
-                    (otra.codigo !== celda.codigo || otra.tipo_dia !== celda.tipo_dia),
-                );
+                const coincide = Boolean(celda && cruza && diaPasa(celda, filtros));
                 const misma = Boolean(
                   seleccion && rowKey(seleccion.cell) === fila.key,
                 );
@@ -533,15 +700,49 @@ function Grilla({
                   misma &&
                   f >= seleccion!.dateFrom &&
                   f <= seleccion!.dateTo;
+                const vacia =
+                  celda ??
+                  celdaHueco(fila.key, f, {
+                    inspector: fila.nombre,
+                    legajo: fila.legajo,
+                  });
+                if (!celda) {
+                  if (soloCambios) return <td key={f} className="sap-empty" />;
+                  const fueraCiclo = Boolean(cubiertoHasta && f > cubiertoHasta);
+                  return (
+                    <td
+                      key={f}
+                      className={`${esFinDeSemana(f) ? 'is-weekend' : ''}`.trim() || undefined}
+                    >
+                      <ShiftCell
+                        cell={vacia}
+                        date={f}
+                        selected={misma && seleccion!.focus === f}
+                        rangeSelected={enRango && seleccion!.focus !== f}
+                        onSelect={fueraCiclo ? undefined : onSelect}
+                      />
+                    </td>
+                  );
+                }
+                const otra = contraMap.get(`${fila.key}|${f}`);
+                const differs = esDiff(celda, otra);
+                if (soloCambios && !differs) {
+                  return <td key={f} className="sap-empty" />;
+                }
                 return (
-                  <td key={f} className={esFinDeSemana(f) ? 'is-weekend' : undefined}>
+                  <td
+                    key={f}
+                    className={`${esFinDeSemana(f) ? 'is-weekend' : ''}${
+                      oculta ? ' is-filtered' : coincide ? ' is-match' : ''
+                    }`.trim() || undefined}
+                  >
                     <ShiftCell
                       cell={celda}
                       date={f}
                       differs={differs}
                       selected={misma && seleccion!.focus === f}
                       rangeSelected={enRango && seleccion!.focus !== f}
-                      onSelect={onSelect}
+                      onSelect={oculta ? undefined : onSelect}
                     />
                   </td>
                 );
@@ -560,14 +761,38 @@ export function CuadraturaPage() {
   const inicial = useMemo(() => monthBounds(iso(new Date())), []);
   const hoy = useMemo(() => iso(new Date()), []);
   const capa: Vista = params.get('vista') === 'real' ? 'real' : 'plan';
+  const ambito = parseAmbito(params.get('ambito'), params.get('plantel'));
+  const planteles = parsePlanteles(params.get('plantel'), ambito);
+  const plantel = planteles[0] ?? plantelPorDefecto(ambito);
+  const { boxes } = useBoxTheme();
+  const { paneles } = useCuadPaneles();
+  const leyendaBoxes = useMemo(() => boxes.filter((b) => b.visible), [boxes]);
+  const mostrarSeccion = planteles.length > 1;
+  const plantelLabel =
+    planteles.length === 1
+      ? (PLANTELES.find((p) => p.id === plantel)?.title ?? 'Inspectores')
+      : planteles
+          .map((id) => PLANTELES.find((p) => p.id === id)?.title ?? id)
+          .join(' · ');
+  const personasLabel = [...new Set(planteles.map(etiquetaPersonas))].length === 1
+    ? etiquetaPersonas(plantel)
+    : 'Personas';
+  const personaRol = [...new Set(planteles.map(etiquetaPersonaRol))].length === 1
+    ? etiquetaPersonaRol(plantel)
+    : 'Persona';
 
   const [desde, setDesde] = useState(() => params.get('from') || inicial.from);
   const [hasta, setHasta] = useState(() => params.get('to') || inicial.to);
+  const desdeVista = useDeferredValue(desde);
+  const hastaVista = useDeferredValue(hasta);
 
   const [planes, setPlanes] = useState<Version[]>([]);
   const [reales, setReales] = useState<Version[]>([]);
   const [boardPlan, setBoardPlan] = useState<BoardResponse | null>(null);
   const [boardReal, setBoardReal] = useState<BoardResponse | null>(null);
+  /** Rango del último calendar cargado (columnas no saltan hasta tener datos). */
+  const [rangoPlan, setRangoPlan] = useState<{ from: string; to: string } | null>(null);
+  const [rangoReal, setRangoReal] = useState<{ from: string; to: string } | null>(null);
   const [cargandoPlan, setCargandoPlan] = useState(false);
   const [cargandoReal, setCargandoReal] = useState(false);
   const [ocupado, setOcupado] = useState<string | null>(null);
@@ -588,35 +813,55 @@ export function CuadraturaPage() {
   const [filtroLicencias, setFiltroLicencias] = useState<string[]>([]);
   const [filtroMoviles, setFiltroMoviles] = useState<string[]>([]);
   const [filtroTurnos, setFiltroTurnos] = useState<string[]>([]);
+  const [soloCambios, setSoloCambios] = useState(false);
   const [licencias, setLicencias] = useState<Licencia[]>([]);
 
   const [inspectores, setInspectores] = useState<Inspector[] | null>(null);
   const [movilesActivos, setMovilesActivos] = useState<number[]>([]);
   const [cbInspector, setCbInspector] = useState('');
-  const [cbTipo, setCbTipo] = useState<TipoCambio>('VACACION');
-  const [cbLicencia, setCbLicencia] = useState('');
+  const [cbTipo, setCbTipo] = useState<TipoCambio>('CODIGO');
+  const [cbCodigo, setCbCodigo] = useState('');
+  const [cbCon, setCbCon] = useState('');
   const [cbDesde, setCbDesde] = useState('');
   const [cbHasta, setCbHasta] = useState('');
-  const [cbTurno, setCbTurno] = useState<'' | 'M' | 'T' | 'N'>('');
-  const [cbMovil, setCbMovil] = useState<string>('');
   const [cbMotivo, setCbMotivo] = useState('');
-  const [dockH, setDockH] = useState(() => {
-    const n = Number(localStorage.getItem('cuad-dock-h'));
-    return Number.isFinite(n) ? clampDock(n) : DOCK_DEFAULT;
-  });
-  const [dockResizing, setDockResizing] = useState(false);
+  const [cbObservacion, setCbObservacion] = useState('');
+  const [motivosCat, setMotivosCat] = useState<Array<{ id: string; nombre: string }>>([]);
+  const [consola, setConsola] = useState(() => localStorage.getItem('cuad-consola') !== '0');
+  const [anchosSide, setAnchosSide] = useState(() => ({
+    plan: leerConsolaW('plan'),
+    real: leerConsolaW('real'),
+  }));
+  const workRef = useRef<HTMLDivElement>(null);
+  const [exportPendiente, setExportPendiente] = useState<Pack | null>(null);
+  const [confirmKind, setConfirmKind] = useState<null | 'cambio' | 'ideal'>(null);
+  const [idealPendiente, setIdealPendiente] = useState<AlcanceIdeal | null>(null);
 
   const datoDesde = useMemo(() => primerDato([...planes, ...reales]), [planes, reales]);
-  const cubiertoHasta = useMemo(
+  /** Último día con filas reales en la grilla Ideal (el periodo del cronograma a veces se adelanta). */
+  const cubiertoHastaDatos = useMemo(() => {
+    let max = '';
+    for (const d of boardPlan?.days ?? []) {
+      if (d.fecha_operativa > max) max = d.fecha_operativa;
+    }
+    return max;
+  }, [boardPlan]);
+  const cubiertoHastaMeta = useMemo(
     () => ultimoDato(planes.length ? planes : reales),
     [planes, reales],
   );
+  const cubiertoHasta = useMemo(() => {
+    // Si ya cargamos el tablero Ideal, el periodo del cronograma no alcanza:
+    // a veces dice "hasta octubre" pero septiembre no tiene días.
+    if (boardPlan) return cubiertoHastaDatos;
+    return cubiertoHastaMeta;
+  }, [boardPlan, cubiertoHastaDatos, cubiertoHastaMeta]);
   const hueco = useMemo(
-    () => (versionesListas ? rangoAGenerar(cubiertoHasta, desde, hasta) : null),
-    [versionesListas, cubiertoHasta, desde, hasta],
+    () => (versionesListas ? rangoAGenerar(cubiertoHasta, desdeVista, hastaVista) : null),
+    [versionesListas, cubiertoHasta, desdeVista, hastaVista],
   );
-  const plan = useMemo(() => elegir(planes, desde, hasta), [planes, desde, hasta]);
-  const real = useMemo(() => elegir(reales, desde, hasta), [reales, desde, hasta]);
+  const plan = useMemo(() => elegir(planes, desdeVista, hastaVista), [planes, desdeVista, hastaVista]);
+  const real = useMemo(() => elegir(reales, desdeVista, hastaVista), [reales, desdeVista, hastaVista]);
   const mesPrevioFuera = Boolean(datoDesde && shiftMonth(desde, -1).to < datoDesde);
   const diffs = useMemo(
     () => contarDiffs(boardPlan, boardReal),
@@ -632,6 +877,36 @@ export function CuadraturaPage() {
     () => licencias.filter((l) => l.activo),
     [licencias],
   );
+  const opcionesCodigo = useMemo(() => {
+    const tm = movilesActivos.flatMap((m) =>
+      SHIFTS.map((t) => ({
+        grupo: 'Turno · móvil',
+        valor: `TM:${t}${m}`,
+        etiqueta: `${t}${m} · ${SHIFT_LABEL[t]} ${m}`,
+      })),
+    );
+    const sit = [
+      { grupo: 'Situación', valor: 'A:FERIADO', etiqueta: 'F · Franco' },
+      { grupo: 'Situación', valor: 'A:VACACION', etiqueta: 'V · Vacaciones' },
+      { grupo: 'Situación', valor: 'A:ENFERMEDAD', etiqueta: 'EF · Enfermedad' },
+    ];
+    const lic = licenciasActivas.map((l) => ({
+      grupo: 'Códigos',
+      valor: `L:${l.id}`,
+      etiqueta: `${l.codigo} · ${l.horario || l.nombre}`,
+    }));
+    return [...tm, ...sit, ...lic];
+  }, [movilesActivos, licenciasActivas]);
+  const opcionesCodigoBuscar = useMemo(
+    () =>
+      opcionesCodigo.map((o) => ({
+        id: o.valor,
+        label: o.etiqueta,
+        group: o.grupo,
+        search: `${o.etiqueta} ${o.valor}`,
+      })),
+    [opcionesCodigo],
+  );
   const filtros = useMemo<FiltrosGrilla>(
     () => ({
       inspectores: filtroInspectores,
@@ -641,28 +916,42 @@ export function CuadraturaPage() {
     }),
     [filtroInspectores, filtroLicencias, filtroMoviles, filtroTurnos],
   );
+  const inspectoresVista = useMemo(() => {
+    const secs = new Set<string>(seccionesDePlanteles(planteles));
+    return (inspectores ?? []).filter((p) => secs.has(p.seccion || 'MOVILES'));
+  }, [inspectores, planteles]);
+  const plantelOk =
+    planteles.some(plantelListo) || Boolean(inspectores && inspectoresVista.length > 0);
   const opcionesInspectores = useMemo(
     () =>
-      (inspectores ?? []).map((p) => ({
-        id: p.id,
-        label: etiquetaPersona(p),
-        search: [p.legajo, p.apellido, p.nombres, p.nombre_completo]
-          .filter(Boolean)
-          .join(' '),
-      })),
-    [inspectores],
+      inspectoresVista.map((p) => {
+        const nom = apellidoYNombre(p);
+        const leg = (p.legajo || '').trim();
+        const label = leg && !/^SV-GEN-/i.test(leg) ? `${leg} - ${nom}` : nom;
+        return {
+          id: p.id,
+          label,
+          search: [p.legajo, p.apellido, p.nombres, p.nombre_completo]
+            .filter(Boolean)
+            .join(' '),
+        };
+      }),
+    [inspectoresVista],
   );
   const opcionesLicencias = useMemo(
     () =>
       licenciasActivas.map((l) => ({
         id: l.codigo,
-        label: l.nombre,
-        search: l.codigo,
+        label: `${l.codigo} · ${l.horario || l.nombre}`,
+        search: `${l.codigo} ${l.codigo_sap || ''} ${l.horario || l.nombre}`,
       })),
     [licenciasActivas],
   );
   const opcionesMoviles = useMemo(
-    () => movilesActivos.map((n) => ({ id: String(n), label: String(n) })),
+    () =>
+      [...movilesActivos]
+        .sort((a, b) => a - b)
+        .map((n) => ({ id: String(n), label: String(n) })),
     [movilesActivos],
   );
   const opcionesTurnos = useMemo(
@@ -670,15 +959,27 @@ export function CuadraturaPage() {
     [],
   );
   const catalogoInspectores = useMemo(
-    () => (inspectores ? new Set(inspectores.map((i) => i.id)) : undefined),
-    [inspectores],
+    () => (inspectores ? new Set(inspectoresVista.map((i) => i.id)) : undefined),
+    [inspectores, inspectoresVista],
   );
   const personasPorId = useMemo(
     () => new Map((inspectores ?? []).map((p) => [p.id, p])),
     [inspectores],
   );
-  /** En Real, si no hay capa propia todavía, se muestra la ideal. */
-  const board = esIdeal ? boardPlan : boardReal ?? boardPlan;
+  /** En Real, el ciclo de Ideal y encima los cambios. */
+  const board = esIdeal ? boardPlan : fusionarReal(boardPlan, boardReal);
+  const celdasRango = useMemo(() => {
+    if (!seleccion) return [];
+    const from = cbDesde || seleccion.dateFrom;
+    const to = cbHasta || seleccion.dateTo;
+    return celdasDelRango(
+      board,
+      seleccion.cell.inspector_id,
+      from,
+      to,
+      { inspector: seleccion.cell.inspector, legajo: seleccion.cell.legajo },
+    );
+  }, [board, seleccion, cbDesde, cbHasta]);
   const cargando = esIdeal ? cargandoPlan : Boolean(real) ? cargandoReal : cargandoPlan;
   const versionExport = esIdeal ? plan : real ?? plan;
 
@@ -706,34 +1007,57 @@ export function CuadraturaPage() {
     };
   }, [recargarVersiones, toast.push]);
 
+  const seqPlan = useRef(0);
+  const seqReal = useRef(0);
+
   const cargarCapa = useCallback(
     async (capa: Capa, versionId: string | undefined) => {
       const setBoard = capa === 'PLANIFICADA' ? setBoardPlan : setBoardReal;
+      const setRango = capa === 'PLANIFICADA' ? setRangoPlan : setRangoReal;
       const setCargando = capa === 'PLANIFICADA' ? setCargandoPlan : setCargandoReal;
+      const seqRef = capa === 'PLANIFICADA' ? seqPlan : seqReal;
+      const seq = ++seqRef.current;
       if (!versionId) {
-        setBoard(null);
+        if (seq === seqRef.current) {
+          setBoard(null);
+          setRango(null);
+          setCargando(false);
+        }
         return;
       }
       setCargando(true);
+      const from = desdeVista;
+      const to = hastaVista;
       try {
-        const q = new URLSearchParams({ date_from: desde, date_to: hasta });
-        setBoard(await api<BoardResponse>(`/planning/${versionId}/calendar?${q}`));
+        const q = new URLSearchParams({ date_from: from, date_to: to });
+        const board = await api<BoardResponse>(`/planning/${versionId}/calendar?${q}`);
+        if (seq !== seqRef.current) return;
+        setBoard(board);
+        setRango({ from, to });
       } catch (e) {
+        if (seq !== seqRef.current) return;
         toast.push({ tone: 'error', message: mensaje(e) });
         setBoard(null);
+        setRango(null);
       } finally {
-        setCargando(false);
+        if (seq === seqRef.current) setCargando(false);
       }
     },
-    [desde, hasta, toast.push],
+    [desdeVista, hastaVista, toast.push],
   );
 
   useEffect(() => {
-    void cargarCapa('PLANIFICADA', plan?.id);
+    const h = window.setTimeout(() => {
+      void cargarCapa('PLANIFICADA', plan?.id);
+    }, 80);
+    return () => window.clearTimeout(h);
   }, [cargarCapa, plan?.id]);
 
   useEffect(() => {
-    void cargarCapa('REAL', real?.id);
+    const h = window.setTimeout(() => {
+      void cargarCapa('REAL', real?.id);
+    }, 80);
+    return () => window.clearTimeout(h);
   }, [cargarCapa, real?.id]);
 
   useEffect(() => {
@@ -747,6 +1071,9 @@ export function CuadraturaPage() {
       api<Array<{ numero: number }>>('/operations/mobiles')
         .then((rows) => setMovilesActivos(rows.map((r) => r.numero)))
         .catch(() => setMovilesActivos([]));
+      api<Array<{ id: string; nombre: string }>>('/operations/timer-motivos')
+        .then(setMotivosCat)
+        .catch(() => setMotivosCat([]));
     }
     recargarCatalogos();
     function onFocus() {
@@ -776,13 +1103,8 @@ export function CuadraturaPage() {
     if (seleccion.cell.inspector_id) setCbInspector(seleccion.cell.inspector_id);
     setCbDesde(seleccion.dateFrom);
     setCbHasta(seleccion.dateTo);
-    if (seleccion.dateFrom !== seleccion.dateTo) return;
-    const t = tipoDesdeCelda(seleccion.cell, licenciasActivas);
-    setCbTipo(t.tipo);
-    setCbLicencia(t.licenciaId);
-    setCbTurno(t.turno);
-    setCbMovil(t.movil);
-  }, [seleccion, licenciasActivas]);
+    if (cbCon && cbCon === (seleccion.cell.inspector_id || '')) setCbCon('');
+  }, [seleccion]);
 
   function avisarSinDatosAntes() {
     if (!datoDesde) return;
@@ -811,56 +1133,16 @@ export function CuadraturaPage() {
     if (f > t) t = f;
     setDesde(f);
     setHasta(t);
-    setSeleccion(null);
-  }
-
-  function guardarDock(n: number) {
-    const v = clampDock(n);
-    setDockH(v);
-    localStorage.setItem('cuad-dock-h', String(v));
-  }
-
-  function beginDock(e: MouseEvent<HTMLButtonElement>) {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    const startY = e.clientY;
-    const start = dockH;
-    setDockResizing(true);
-    document.body.style.cursor = 'ns-resize';
-    document.body.style.userSelect = 'none';
-    const move = (ev: globalThis.MouseEvent) => {
-      setDockH(clampDock(start + startY - ev.clientY));
-    };
-    const up = (ev: globalThis.MouseEvent) => {
-      document.removeEventListener('mousemove', move);
-      document.removeEventListener('mouseup', up);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      setDockResizing(false);
-      guardarDock(start + startY - ev.clientY);
-    };
-    document.addEventListener('mousemove', move);
-    document.addEventListener('mouseup', up);
-  }
-
-  function onDockKey(e: KeyboardEvent<HTMLButtonElement>) {
-    const step = e.shiftKey ? 24 : 8;
-    if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      guardarDock(dockH + step);
-    } else if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      guardarDock(dockH - step);
-    } else if (e.key === 'Home') {
-      e.preventDefault();
-      guardarDock(DOCK_MIN);
-    } else if (e.key === 'End') {
-      e.preventDefault();
-      guardarDock(DOCK_MAX);
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      guardarDock(DOCK_DEFAULT);
-    }
+    setSeleccion((prev) => {
+      if (!prev) return prev;
+      const df = prev.dateFrom < f ? f : prev.dateFrom;
+      const dt = prev.dateTo > t ? t : prev.dateTo;
+      if (df > dt) return null;
+      return { ...prev, dateFrom: df, dateTo: dt, anchor: df, focus: dt };
+    });
+    // Si el Hasta supera lo ya generado, reintentar predicción automática
+    setFalloHueco('');
+    pedidoHuecoRef.current = '';
   }
 
   function seleccionar(cell: DayRow, date: string, opts?: { extend?: boolean }) {
@@ -871,8 +1153,122 @@ export function CuadraturaPage() {
         const hi = prev.anchor <= date ? date : prev.anchor;
         return { cell, focus: date, anchor: prev.anchor, dateFrom: lo, dateTo: hi };
       }
+      if (
+        prev &&
+        rowKey(prev.cell) === rowKey(cell) &&
+        prev.focus === date
+      ) {
+        return null;
+      }
       return { cell, focus: date, anchor: date, dateFrom: date, dateTo: date };
     });
+  }
+
+  function setRangoForm(from: string, to: string) {
+    if (!from && !to) {
+      setCbDesde('');
+      setCbHasta('');
+      return;
+    }
+    let f = from && to ? (from <= to ? from : to) : from || to;
+    let t = from && to ? (from <= to ? to : from) : from || to;
+    if (datoDesde && f < datoDesde) {
+      f = datoDesde;
+      avisarSinDatosAntes();
+    }
+    setCbDesde(f);
+    setCbHasta(t);
+    setSeleccion((prev) => {
+      if (!prev) return prev;
+      return { ...prev, dateFrom: f, dateTo: t, anchor: f, focus: t };
+    });
+    setDesde((d) => (f && f < d ? f : d));
+    setHasta((h) => (t && t > h ? t : h));
+  }
+
+  function setConsolaAbierta(abierta: boolean) {
+    setConsola(abierta);
+    localStorage.setItem('cuad-consola', abierta ? '1' : '0');
+  }
+
+  const capaAncho: Vista = capa;
+  const sideW = anchosSide[capaAncho];
+
+  function topeAnchoConsola() {
+    const w = workRef.current?.clientWidth ?? 0;
+    if (w < 480) return CONSOLA_W_MAX;
+    return Math.min(CONSOLA_W_MAX, Math.max(CONSOLA_W_MIN, Math.floor(w * 0.5)));
+  }
+
+  function setSideW(n: number) {
+    setAnchosSide((a) => ({ ...a, [capaAncho]: n }));
+  }
+
+  useEffect(() => {
+    localStorage.setItem(CONSOLA_W_KEY[capaAncho], String(sideW));
+  }, [capaAncho, sideW]);
+
+  useEffect(() => {
+    function encajar() {
+      const cap = topeAnchoConsola();
+      setAnchosSide((a) => ({
+        plan: clampConsolaW(a.plan, cap),
+        real: clampConsolaW(a.real, cap),
+      }));
+    }
+    window.addEventListener('resize', encajar);
+    encajar();
+    return () => window.removeEventListener('resize', encajar);
+  }, []);
+
+  function beginSideResize(e: MouseEvent<HTMLSpanElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const start = sideW;
+    const capaDrag = capaAncho;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    const move = (ev: globalThis.MouseEvent) => {
+      const next = clampConsolaW(start + (startX - ev.clientX), topeAnchoConsola());
+      setAnchosSide((a) => ({ ...a, [capaDrag]: next }));
+    };
+    const up = () => {
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', up);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+  }
+
+  function setAmbito(id: AmbitoId) {
+    setParams(
+      (prev) => {
+        const n = new URLSearchParams(prev);
+        n.set('ambito', id);
+        n.set('plantel', plantelPorDefecto(id));
+        return n;
+      },
+      { replace: true },
+    );
+    setSeleccion(null);
+  }
+
+  function setPlanteles(ids: PlantelId[]) {
+    const next = ids.length ? ids : [plantelPorDefecto(ambito)];
+    setParams(
+      (prev) => {
+        const n = new URLSearchParams(prev);
+        n.set('plantel', next.join(','));
+        n.set('ambito', ambito);
+        return n;
+      },
+      { replace: true },
+    );
+    setFiltroInspectores([]);
+    setSeleccion(null);
   }
 
   function setVista(v: Vista) {
@@ -897,32 +1293,36 @@ export function CuadraturaPage() {
   }
 
   const inferirRango = useCallback(
-    async (from: string, to: string) => {
-      if (from > to) {
+    async (genFrom: string, genTo: string, vistaFrom?: string, vistaTo?: string) => {
+      if (genFrom > genTo) {
         toast.push({
           tone: 'error',
           message: 'La fecha de inicio debe ser anterior o igual al fin.',
         });
         return;
       }
-      setOcupado(`Armando el ciclo ${etiquetaRango(from, to)}…`);
+      const vf = vistaFrom ?? desdeVista;
+      const vt = vistaTo ?? hastaVista;
+      setOcupado(`Armando el ciclo ${etiquetaRango(genFrom, genTo)}…`);
       try {
         await api('/schedule-engine/apply', {
           method: 'POST',
-          body: JSON.stringify({ date_from: from, date_to: to }),
+          body: JSON.stringify({ date_from: genFrom, date_to: genTo }),
         });
         await api('/schedule-engine/apply-real', {
           method: 'POST',
-          body: JSON.stringify({ date_from: from, date_to: to }),
+          body: JSON.stringify({ date_from: genFrom, date_to: genTo }),
         });
+        setCasosManuales([]);
+        setFalloHueco('');
         const { planes: p, reales: r } = await recargarVersiones();
         await Promise.all([
-          cargarCapa('PLANIFICADA', elegir(p, desde, hasta)?.id),
-          cargarCapa('REAL', elegir(r, desde, hasta)?.id),
+          cargarCapa('PLANIFICADA', elegir(p, vf, vt)?.id),
+          cargarCapa('REAL', elegir(r, vf, vt)?.id),
         ]);
         toast.push({
           tone: 'success',
-          message: `Ciclo armado ${etiquetaRango(from, to)}.`,
+          message: `Ciclo armado ${etiquetaRango(genFrom, genTo)}.`,
         });
       } catch (err) {
         const cuerpo =
@@ -938,7 +1338,7 @@ export function CuadraturaPage() {
         setOcupado(null);
       }
     },
-    [cargarCapa, desde, hasta, recargarVersiones, toast],
+    [cargarCapa, desdeVista, hastaVista, recargarVersiones, toast],
   );
 
   useEffect(() => {
@@ -946,117 +1346,243 @@ export function CuadraturaPage() {
     const key = `${hueco.from}:${hueco.to}`;
     if (falloHueco === key || pedidoHuecoRef.current === key) return;
     pedidoHuecoRef.current = key;
-    void inferirRango(hueco.from, hueco.to).catch(() => {
+    void inferirRango(hueco.from, hueco.to, desdeVista, hastaVista).catch(() => {
       pedidoHuecoRef.current = '';
       setFalloHueco(key);
     });
-  }, [hueco, ocupado, falloHueco, inferirRango]);
+  }, [hueco, ocupado, falloHueco, inferirRango, desdeVista, hastaVista]);
 
   async function recargarReal() {
     const { reales: r } = await recargarVersiones();
-    await cargarCapa('REAL', elegir(r, desde, hasta)?.id);
+    await cargarCapa('REAL', elegir(r, desdeVista, hastaVista)?.id);
   }
 
-  async function aplicarLicencia(id: string) {
-    if (!seleccion?.cell.inspector_id) return;
-    setOcupado('Registrando…');
-    try {
-      await api('/schedule-engine/absence', {
-        method: 'POST',
-        body: JSON.stringify({
-          inspector_id: seleccion.cell.inspector_id,
-          date_from: seleccion.dateFrom,
-          date_to: seleccion.dateTo,
-          kind: 'LICENCIA',
-          catalogo_licencia_id: id,
-          rematerialize: true,
-        }),
-      });
-      setSeleccion(null);
-      await recargarReal();
-      toast.push({ tone: 'success', message: 'Licencia registrada en la real.' });
-    } catch (err) {
-      toast.push({ tone: 'error', message: mensaje(err) });
-    } finally {
-      setOcupado(null);
-    }
-  }
-
-  async function aplicarTurnoMovil(turno: 'M' | 'T' | 'N', movil: number) {
-    if (!seleccion?.cell.inspector_id) return;
-    setOcupado('Registrando…');
-    try {
-      await api('/schedule-engine/assignment', {
-        method: 'POST',
-        body: JSON.stringify({
-          inspector_id: seleccion.cell.inspector_id,
-          date_from: seleccion.dateFrom,
-          date_to: seleccion.dateTo,
-          shift: turno,
-          mobile: movil,
-          rematerialize: true,
-        }),
-      });
-      setSeleccion(null);
-      await recargarReal();
-      toast.push({ tone: 'success', message: 'Turno y móvil registrados en la real.' });
-    } catch (err) {
-      toast.push({ tone: 'error', message: mensaje(err) });
-    } finally {
-      setOcupado(null);
-    }
-  }
-
-  async function aplicarCambio(e: FormEvent) {
-    e.preventDefault();
-    if (!cbInspector) {
-      toast.push({ tone: 'error', message: 'Elegí un inspector.' });
-      return;
-    }
-    if (!cbDesde || !cbHasta || cbDesde > cbHasta) {
-      toast.push({ tone: 'error', message: 'Revisá el rango de fechas.' });
-      return;
-    }
-    if (cbTipo === 'LICENCIA' && !cbLicencia) {
-      toast.push({
-        tone: 'error',
-        message:
-          licenciasActivas.length === 0
-            ? 'No hay tipos de licencia activos. Cargalos en Administración → Licencias.'
-            : 'Elegí el tipo de licencia.',
-      });
-      return;
-    }
-    if (cbTipo === 'TURNO_MOVIL' && cbMovil && !movilesActivos.includes(Number(cbMovil))) {
-      toast.push({
-        tone: 'error',
-        message: 'Ese móvil no está en Administración. Elegí uno del catálogo.',
-      });
-      return;
-    }
-    if (cbTipo === 'TURNO_MOVIL' && !cbTurno && !cbMovil) {
-      toast.push({ tone: 'error', message: 'Indicá al menos un turno o un móvil.' });
-      return;
-    }
-
-    const dias =
+  function diasCambio() {
+    if (!cbDesde || !cbHasta || cbDesde > cbHasta) return 0;
+    return (
       Math.round(
         (Date.parse(`${cbHasta}T12:00:00Z`) - Date.parse(`${cbDesde}T12:00:00Z`)) /
           86_400_000,
-      ) + 1;
+      ) + 1
+    );
+  }
 
+  function validarCambio(): string | null {
+    if (esIdeal) return 'La ideal es solo consulta.';
+    if (!cbInspector) return `Elegí un ${personaRol.toLowerCase()}.`;
+    if (!cbDesde || !cbHasta || cbDesde > cbHasta) return 'Revisá el rango de fechas.';
+    if (cbTipo === 'ENROQUE') {
+      if (!cbCon) return 'Elegí con quién se enroca.';
+      if (cbCon === cbInspector) return 'El enroque es entre dos inspectores distintos.';
+      return null;
+    }
+    const parsed = parseCodigo(cbCodigo);
+    if (!parsed) return 'Elegí el código.';
+    if (parsed.kind === 'LICENCIA' && !parsed.licenciaId) return 'Elegí el código de ausentismo.';
+    if (parsed.mobile != null && !movilesActivos.includes(parsed.mobile)) {
+      return 'Ese móvil no está en Administración. Elegí uno del catálogo.';
+    }
+    return null;
+  }
+
+  function reasonOperativo() {
+    const m = cbMotivo.trim();
+    const o = cbObservacion.trim();
+    if (m && o) return `${m} · ${o}`;
+    return m || o || undefined;
+  }
+
+  function pedirCambio(e: FormEvent) {
+    e.preventDefault();
+    const err = validarCambio();
+    if (err) {
+      toast.push({ tone: 'error', message: err });
+      return;
+    }
+    setConfirmKind('cambio');
+  }
+
+  function nombresAlcance(ids: string[]) {
+    const etiquetas = ids.map((id) =>
+      apellidoYNombre(
+        (inspectores ?? []).find((p) => p.id === id) ?? { nombre_completo: '—' },
+      ),
+    );
+    if (etiquetas.length <= 3) return etiquetas.join(', ');
+    return `${etiquetas.slice(0, 2).join(', ')} y ${etiquetas.length - 2} más`;
+  }
+
+  function personasVolverIdeal() {
+    if (cbInspector) return [cbInspector];
+    return filtroInspectores;
+  }
+
+  function resolverVolverIdeal(): AlcanceIdeal | { error: string } {
+    const ids = personasVolverIdeal();
+    const hayPersonas = ids.length > 0;
+    const hayFechas = Boolean(cbDesde && cbHasta && cbDesde <= cbHasta);
+    if (!hayPersonas && !hayFechas) {
+      return { error: 'Elegí persona(s) o fechas.' };
+    }
+    if (hayPersonas && hayFechas) {
+      const dias =
+        Math.round(
+          (Date.parse(`${cbHasta}T12:00:00Z`) - Date.parse(`${cbDesde}T12:00:00Z`)) /
+            86_400_000,
+        ) + 1;
+      return {
+        kind: 'seleccion',
+        inspectorIds: ids,
+        dateFrom: cbDesde,
+        dateTo: cbHasta,
+        mensaje: `Vas a volver a Ideal ${nombresAlcance(ids)} del ${isoToDmy(cbDesde)} al ${isoToDmy(cbHasta)} (${dias} día${dias === 1 ? '' : 's'}). Se borra lo de Real; esos días quedan como en Ideal.`,
+      };
+    }
+    if (hayPersonas) {
+      return {
+        kind: 'filas',
+        inspectorIds: ids,
+        dateFrom: desdeVista,
+        dateTo: hastaVista,
+        mensaje: `Vas a volver a Ideal las filas de ${nombresAlcance(ids)} en lo visible (${isoToDmy(desdeVista)} → ${isoToDmy(hastaVista)}). Se borra lo de Real; esos días quedan como en Ideal.`,
+      };
+    }
+    return {
+      kind: 'columnas',
+      inspectorIds: null,
+      dateFrom: cbDesde,
+      dateTo: cbHasta,
+      mensaje: `Vas a volver a Ideal las columnas del ${isoToDmy(cbDesde)} al ${isoToDmy(cbHasta)} (todas las personas). Se borra lo de Real; esos días quedan como en Ideal.`,
+    };
+  }
+
+  function pedirVolverIdeal() {
+    if (esIdeal) return;
+    const r = resolverVolverIdeal();
+    if ('error' in r) {
+      toast.push({ tone: 'error', message: r.error });
+      return;
+    }
+    setIdealPendiente(r);
+    setConfirmKind('ideal');
+  }
+
+  async function ejecutarVolverIdeal(alcance?: AlcanceIdeal | null) {
+    const r = alcance ?? idealPendiente;
+    if (!r) return false;
+    const dias =
+      Math.round(
+        (Date.parse(`${r.dateTo}T12:00:00Z`) - Date.parse(`${r.dateFrom}T12:00:00Z`)) /
+          86_400_000,
+      ) + 1;
+    const quien = r.inspectorIds ? nombresAlcance(r.inspectorIds) : 'todos';
+    setOcupado(`Volviendo a Ideal ${dias} día(s)…`);
+    try {
+      let cleared = 0;
+      let restored = 0;
+      const ids = r.inspectorIds;
+      if (!ids) {
+        const res = await api<{ cleared: number; restored?: number }>(
+          '/schedule-engine/clear-range',
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              date_from: r.dateFrom,
+              date_to: r.dateTo,
+              reason: reasonOperativo(),
+              rematerialize: true,
+            }),
+          },
+        );
+        cleared = res.cleared;
+        restored = res.restored ?? 0;
+      } else {
+        for (let i = 0; i < ids.length; i++) {
+          const res = await api<{ cleared: number; restored?: number }>(
+            '/schedule-engine/clear-range',
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                inspector_id: ids[i],
+                date_from: r.dateFrom,
+                date_to: r.dateTo,
+                reason: reasonOperativo(),
+                rematerialize: true,
+              }),
+            },
+          );
+          cleared += res.cleared;
+          restored += res.restored ?? 0;
+        }
+      }
+      await recargarReal();
+      toast.push({
+        tone: 'success',
+        message:
+          restored || cleared
+            ? `Real volvió a Ideal · ${quien} · ${dias} día(s).`
+            : `Nada que volver en ese rango · ${quien}.`,
+      });
+      return true;
+    } catch (err) {
+      toast.push({ tone: 'error', message: mensaje(err) });
+      return false;
+    } finally {
+      setOcupado(null);
+    }
+  }
+
+  async function ejecutarCambio() {
+    const err = validarCambio();
+    if (err) {
+      toast.push({ tone: 'error', message: err });
+      return;
+    }
+    const dias = diasCambio();
+    if (cbTipo === 'ENROQUE') {
+      setOcupado(`Enrocando ${dias} día(s)…`);
+      try {
+        await api('/schedule-engine/swap', {
+          method: 'POST',
+          body: JSON.stringify({
+            inspector_a_id: cbInspector,
+            inspector_b_id: cbCon,
+            date_from: cbDesde,
+            date_to: cbHasta,
+            reason: reasonOperativo(),
+            rematerialize: true,
+          }),
+        });
+        setSeleccion(null);
+        setCbMotivo('');
+        setCbObservacion('');
+        await recargarReal();
+        toast.push({
+          tone: 'success',
+          message: `Enroque en la real · ${dias} día(s). La ideal no se tocó.`,
+        });
+      } catch (err2) {
+        toast.push({ tone: 'error', message: mensaje(err2) });
+      } finally {
+        setOcupado(null);
+      }
+      return;
+    }
+
+    const parsed = parseCodigo(cbCodigo);
+    if (!parsed) return;
     setOcupado(`Registrando ${dias} día(s)…`);
     try {
-      if (cbTipo === 'TURNO_MOVIL') {
+      if (parsed.shift) {
         await api('/schedule-engine/assignment', {
           method: 'POST',
           body: JSON.stringify({
             inspector_id: cbInspector,
             date_from: cbDesde,
             date_to: cbHasta,
-            ...(cbTurno ? { shift: cbTurno } : {}),
-            ...(cbMovil ? { mobile: Number(cbMovil) } : {}),
-            reason: cbMotivo || undefined,
+            shift: parsed.shift,
+            mobile: parsed.mobile,
+            reason: reasonOperativo(),
             rematerialize: true,
           }),
         });
@@ -1067,39 +1593,77 @@ export function CuadraturaPage() {
             inspector_id: cbInspector,
             date_from: cbDesde,
             date_to: cbHasta,
-            kind: cbTipo,
-            reason: cbMotivo || undefined,
-            ...(cbTipo === 'LICENCIA' && cbLicencia
-              ? { catalogo_licencia_id: cbLicencia }
-              : {}),
+            kind: parsed.kind,
+            reason: reasonOperativo(),
+            ...(parsed.licenciaId ? { catalogo_licencia_id: parsed.licenciaId } : {}),
             rematerialize: true,
           }),
         });
       }
       setSeleccion(null);
       setCbMotivo('');
+      setCbObservacion('');
       await recargarReal();
       toast.push({
         tone: 'success',
         message: `Registrado en la real · ${dias} día(s). La ideal no se tocó.`,
       });
-    } catch (err) {
-      toast.push({ tone: 'error', message: mensaje(err) });
+    } catch (err2) {
+      toast.push({ tone: 'error', message: mensaje(err2) });
     } finally {
       setOcupado(null);
     }
   }
 
-  async function exportar(pack: Pack) {
+  const hayFiltrosExport =
+    filtroInspectores.length > 0 ||
+    filtroLicencias.length > 0 ||
+    filtroMoviles.length > 0 ||
+    filtroTurnos.length > 0;
+
+  const resumenFiltrosExport = [
+    filtroLicencias.length ? `Códigos ${filtroLicencias.join(', ')}` : '',
+    filtroMoviles.length ? `Móviles ${filtroMoviles.join(', ')}` : '',
+    filtroTurnos.length ? `Turnos ${filtroTurnos.join(', ')}` : '',
+    filtroInspectores.length
+      ? `${filtroInspectores.length} inspector${filtroInspectores.length === 1 ? '' : 'es'}`
+      : '',
+  ].filter(Boolean);
+
+  function pedirExportar(pack: Pack) {
     if (!versionExport) {
       toast.push({ tone: 'error', message: 'No hay cuadratura para exportar.' });
       return;
     }
+    if (hayFiltrosExport) {
+      setExportPendiente(pack);
+      return;
+    }
+    void exportar(pack, false);
+  }
+
+  async function exportar(pack: Pack, conFiltros: boolean) {
+    if (!versionExport) {
+      toast.push({ tone: 'error', message: 'No hay cuadratura para exportar.' });
+      return;
+    }
+    setExportPendiente(null);
     setOcupado('Armando el Excel…');
     try {
       const base = import.meta.env.VITE_API_URL || '/api';
+      const q = new URLSearchParams({ pack });
+      if (desdeVista) q.set('from', desdeVista);
+      if (hastaVista) q.set('to', hastaVista);
+      const secciones = seccionesDePlanteles(planteles);
+      if (secciones.length) q.set('secciones', secciones.join(','));
+      if (conFiltros) {
+        if (filtroInspectores.length) q.set('inspectores', filtroInspectores.join(','));
+        if (filtroLicencias.length) q.set('codigos', filtroLicencias.join(','));
+        if (filtroMoviles.length) q.set('moviles', filtroMoviles.join(','));
+        if (filtroTurnos.length) q.set('turnos', filtroTurnos.join(','));
+      }
       const res = await fetch(
-        `${base}/exports/version/${versionExport.id}.xlsx?pack=${pack}`,
+        `${base}/exports/version/${versionExport.id}.xlsx?${q}`,
         {
           headers: { Authorization: `Bearer ${localStorage.getItem('sv_token') ?? ''}` },
         },
@@ -1115,7 +1679,10 @@ export function CuadraturaPage() {
       a.download = nombre;
       a.click();
       URL.revokeObjectURL(url);
-      toast.push({ tone: 'success', message: `Descargado: ${nombre}` });
+      toast.push({
+        tone: 'success',
+        message: conFiltros ? `Descargado con filtros: ${nombre}` : `Descargado: ${nombre}`,
+      });
     } catch (e) {
       toast.push({ tone: 'error', message: mensaje(e) });
     } finally {
@@ -1123,8 +1690,35 @@ export function CuadraturaPage() {
     }
   }
 
-  const fechas = useMemo(() => eachDate(desde, hasta), [desde, hasta]);
-  const hayCiclo = Boolean(boardPlan);
+  const fechas = useMemo(() => {
+    // Mientras llega el calendar nuevo, se mantienen las columnas del tablero
+    // actual: evita celdas vacías / parpadeo al cambiar Desde–Hasta.
+    const r = esIdeal ? rangoPlan : rangoReal;
+    const loading = esIdeal ? cargandoPlan : cargandoReal;
+    if (loading && r) return eachDate(r.from, r.to);
+    return eachDate(desdeVista, hastaVista);
+  }, [esIdeal, rangoPlan, rangoReal, cargandoPlan, cargandoReal, desdeVista, hastaVista]);
+  // Versión con período “cubierto” pero sin filas en el rango visible = vacío real.
+  const hayCiclo = Boolean(boardPlan?.days?.length);
+  const asideVisible = consola;
+  const diasForm = diasCambio();
+  const accionForm = cbTipo === 'ENROQUE' ? 'Enrocar' : 'Aplicar';
+  const personaA = (inspectores ?? []).find((p) => p.id === cbInspector);
+  const personaB = (inspectores ?? []).find((p) => p.id === cbCon);
+  const codigoA = useMemo(() => {
+    if (!cbInspector || !cbDesde || !board) return '';
+    const d = board.days.find(
+      (x) => x.inspector_id === cbInspector && toDateOnly(x.fecha_operativa) === cbDesde,
+    );
+    return d ? cellShortLabel(d) : '';
+  }, [board, cbInspector, cbDesde]);
+  const codigoB = useMemo(() => {
+    if (!cbCon || !cbDesde || !board) return '';
+    const d = board.days.find(
+      (x) => x.inspector_id === cbCon && toDateOnly(x.fecha_operativa) === cbDesde,
+    );
+    return d ? cellShortLabel(d) : '';
+  }, [board, cbCon, cbDesde]);
 
   return (
     <div className="stack cuad-page">
@@ -1178,91 +1772,76 @@ export function CuadraturaPage() {
       )}
 
       <header className="cuad-head">
-        <div className="cuad-head-title">
-          <h1>Inspectores</h1>
-          <div className="cuad-vista" role="tablist" aria-label="Capa de la cuadratura">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={esIdeal}
-              className={esIdeal ? 'active' : undefined}
-              onClick={() => setVista('plan')}
-            >
-              Ideal
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={!esIdeal}
-              className={esIdeal ? undefined : 'active'}
-              onClick={() => setVista('real')}
-            >
-              Real
-            </button>
+        <div className="cuad-head-top">
+          <div className="cuad-head-brand">
+            <h1>Cuadratura</h1>
+            <p className="cuad-head-kicker">{plantelLabel}</p>
           </div>
-        </div>
-        <div className="cuad-head-actions">
-          <button
-            type="button"
-            className="btn secondary sm"
-            onClick={() => void exportar('cuadratura')}
-            disabled={!!ocupado || !versionExport}
+          <PlantelSwitch
+            ambito={ambito}
+            planteles={planteles}
+            onAmbito={setAmbito}
+            onPlanteles={setPlanteles}
           >
-            Cuadratura
-          </button>
-          <button
-            type="button"
-            className="btn secondary sm"
-            onClick={() => void exportar('planillas')}
-            disabled={!!ocupado || !versionExport}
-          >
-            Planillas
-          </button>
+            <div className="cuad-vista" role="tablist" aria-label="Capa">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={esIdeal}
+                className={esIdeal ? 'active' : undefined}
+                onClick={() => setVista('plan')}
+              >
+                Ideal
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={!esIdeal}
+                className={esIdeal ? undefined : 'active real'}
+                onClick={() => setVista('real')}
+              >
+                Real
+              </button>
+            </div>
+          </PlantelSwitch>
         </div>
-      </header>
-
-      <section className="panel cuad-bar">
         <form
-          className="cuad-bar-form"
+          className="cuad-workbar"
           onSubmit={(e) => {
             e.preventDefault();
           }}
         >
-          <div className="cuad-month" role="group" aria-label="Mes">
-            <button
-              type="button"
-              className="btn secondary sm"
-              title={
-                mesPrevioFuera && datoDesde
-                  ? `No se disponen datos antes del ${isoToDmy(datoDesde)}`
-                  : 'Mes anterior'
-              }
-              onClick={() => irMes(-1)}
-            >
-              ‹
-            </button>
-            <strong>
-              {esMes ? monthLabel(desde) : `${isoToDmy(desde)} → ${isoToDmy(hasta)}`}
-            </strong>
-            <button type="button" className="btn secondary sm" onClick={() => irMes(1)}>
-              ›
-            </button>
-          </div>
-          <div className="cuad-range" role="group" aria-label="Período">
-            <div className="cuad-filter">
-              <label htmlFor="cuad-desde">Desde</label>
+          <div className="cuad-period" role="group" aria-label="Período">
+            <div className="cuad-month" role="group" aria-label="Mes">
+              <button
+                type="button"
+                className="btn secondary sm"
+                title={
+                  mesPrevioFuera && datoDesde
+                    ? `No se disponen datos antes del ${isoToDmy(datoDesde)}`
+                    : 'Mes anterior'
+                }
+                onClick={() => irMes(-1)}
+              >
+                ‹
+              </button>
+              <strong>
+                {esMes ? monthLabel(desde) : `${isoToDmy(desde)} → ${isoToDmy(hasta)}`}
+              </strong>
+              <button type="button" className="btn secondary sm" onClick={() => irMes(1)}>
+                ›
+              </button>
+            </div>
+            <div className="cuad-range" role="group" aria-label="Desde y hasta">
               <DateField
                 id="cuad-desde"
                 aria-label="Desde"
                 value={desde}
                 onChange={(v) => aplicarRango(v, hasta)}
               />
-            </div>
-            <span className="cuad-range-sep" aria-hidden>
-              –
-            </span>
-            <div className="cuad-filter">
-              <label htmlFor="cuad-hasta">Hasta</label>
+              <span className="cuad-range-sep" aria-hidden>
+                –
+              </span>
               <DateField
                 id="cuad-hasta"
                 aria-label="Hasta"
@@ -1270,94 +1849,87 @@ export function CuadraturaPage() {
                 onChange={(v) => aplicarRango(desde, v)}
               />
             </div>
+            <DateRangePresets
+              from={desde}
+              to={hasta}
+              onApply={aplicarRango}
+              compact
+              include={['this-week', 'this-month', 'next-month']}
+            />
           </div>
-          <DateRangePresets
-            from={desde}
-            to={hasta}
-            onApply={aplicarRango}
-            compact
-            include={['this-week', 'this-month', 'next-month']}
-          />
+          <div className="cuad-workbar-sep" aria-hidden />
           <div className="cuad-filters">
-            <div className="cuad-filter is-insp">
-              <label htmlFor="cuad-insp">Inspectores</label>
-              <FilterPicker
-                id="cuad-insp"
-                aria-label="Inspectores"
-                options={opcionesInspectores}
-                values={filtroInspectores}
-                onChange={setFiltroInspectores}
-                allLabel="Todos"
-                placeholder="Buscar legajo, apellido o nombre…"
-              />
-            </div>
-            <div className="cuad-filter">
-              <label htmlFor="cuad-lic">Licencias</label>
-              <FilterPicker
-                id="cuad-lic"
-                aria-label="Licencias"
-                options={opcionesLicencias}
-                values={filtroLicencias}
-                onChange={setFiltroLicencias}
-                allLabel="Todas"
-                placeholder="Buscar licencia…"
-              />
-            </div>
-            <div className="cuad-filter">
-              <label htmlFor="cuad-mov">Móviles</label>
-              <FilterPicker
-                id="cuad-mov"
-                aria-label="Móviles"
-                options={opcionesMoviles}
-                values={filtroMoviles}
-                onChange={setFiltroMoviles}
-                allLabel="Todos"
-                placeholder="Buscar móvil…"
-              />
-            </div>
-            <div className="cuad-filter">
-              <label htmlFor="cuad-tur">Turnos</label>
-              <FilterPicker
-                id="cuad-tur"
-                aria-label="Turnos"
-                options={opcionesTurnos}
-                values={filtroTurnos}
-                onChange={setFiltroTurnos}
-                allLabel="Todos"
-                placeholder="Buscar turno…"
-              />
-            </div>
+            <FilterPicker
+              id="cuad-insp"
+              aria-label={personasLabel}
+              summaryLabel={personasLabel}
+              options={opcionesInspectores}
+              values={filtroInspectores}
+              onChange={setFiltroInspectores}
+              allLabel="Todos"
+              placeholder="Buscar legajo, apellido o nombre…"
+            />
+            <FilterPicker
+              id="cuad-lic"
+              aria-label="Códigos"
+              summaryLabel="Códigos"
+              options={opcionesLicencias}
+              values={filtroLicencias}
+              onChange={setFiltroLicencias}
+              allLabel="Todos"
+              placeholder="Buscar código…"
+            />
+            <FilterPicker
+              id="cuad-mov"
+              aria-label="Móviles"
+              summaryLabel="Móviles"
+              options={opcionesMoviles}
+              values={filtroMoviles}
+              onChange={setFiltroMoviles}
+              allLabel="Todos"
+              variant="pills"
+            />
+            <FilterPicker
+              id="cuad-tur"
+              aria-label="Turnos"
+              summaryLabel="Turnos"
+              options={opcionesTurnos}
+              values={filtroTurnos}
+              onChange={setFiltroTurnos}
+              allLabel="Todos"
+              variant="pills"
+            />
+            {!esIdeal ? (
+              <label className="cuad-filter-check">
+                <input
+                  type="checkbox"
+                  checked={soloCambios}
+                  onChange={(e) => setSoloCambios(e.target.checked)}
+                />
+                Cambios{diffs ? ` (${diffs})` : ''}
+              </label>
+            ) : null}
           </div>
+          {avisoAntes ? (
+            <p className="cuad-aviso" role="status">
+              {avisoAntes}
+            </p>
+          ) : null}
+          {ocupado ? (
+            <p className="cuad-busy" role="status">
+              {ocupado}
+            </p>
+          ) : null}
         </form>
-        {avisoAntes ? (
-          <p className="cuad-aviso" role="status">
-            {avisoAntes}
-          </p>
-        ) : null}
-        {ocupado && (
-          <p className="cuad-busy" role="status">
-            {ocupado}
-          </p>
-        )}
-      </section>
+      </header>
 
-      <div className="cuad-meta">
-        <ul className="cuad-legend">
-          {LEYENDA.map((item) => (
-            <li key={item.cls}>
-              <span className={`cuad-swatch ${item.cls}`} />
-              {item.txt}
-            </li>
-          ))}
-          {!esIdeal && diffs > 0 && (
-            <li>
-              <span className="cuad-swatch differs" />
-              Distinto de la ideal
-            </li>
-          )}
-        </ul>
-      </div>
-
+      {!plantelOk ? (
+        <EmptyState
+          title={`${plantelLabel} próximamente`}
+          description="Este plantel se habilita cuando estén cargados sus códigos y personas."
+        />
+      ) : (
+      <>
       {!hayCiclo && !cargando && !ocupado ? (
         <EmptyState
           title={
@@ -1397,6 +1969,61 @@ export function CuadraturaPage() {
         />
       ) : (
         <section className={`panel cuad-layer is-${esIdeal ? 'plan' : 'real'}`}>
+          <ul className="cuad-legend" aria-label="Leyenda">
+            {leyendaBoxes.map((item) => (
+              <li key={item.id}>
+                <span
+                  className="cuad-swatch"
+                  style={{ background: item.bg, color: item.fg, borderColor: item.fg }}
+                />
+                {item.label}
+              </li>
+            ))}
+            {!esIdeal && diffs > 0 && (
+              <li>
+                <span className="cuad-swatch differs" />
+                Distinto de la ideal
+              </li>
+            )}
+            <li className="cuad-legend-action">
+              <ExcelMenu
+                busy={ocupado === 'Armando el Excel…'}
+                disabled={!!ocupado || !versionExport}
+                items={[
+                  {
+                    id: 'cuadratura',
+                    label: 'Cuadratura',
+                    hint: 'Grilla inspector × día',
+                  },
+                  {
+                    id: 'planillas',
+                    label: 'Planillas',
+                    hint: 'Una hoja por móvil',
+                  },
+                ]}
+                onPick={(id) => pedirExportar(id as Pack)}
+              />
+              {!consola ? (
+                <button
+                  type="button"
+                  className="btn secondary sm"
+                  onClick={() => setConsolaAbierta(true)}
+                >
+                  Mostrar detalle
+                </button>
+              ) : null}
+            </li>
+          </ul>
+          <div
+            ref={workRef}
+            className={`cuad-work${asideVisible ? (esIdeal ? ' is-consulta' : '') : ' is-solo'}`}
+            style={
+              asideVisible
+                ? ({ '--cuad-side-w': `${sideW}px` } as CSSProperties)
+                : undefined
+            }
+          >
+            <div className="cuad-layer-main">
           <Grilla
             board={board}
             fechas={fechas}
@@ -1404,164 +2031,337 @@ export function CuadraturaPage() {
             filtros={filtros}
             catalogo={catalogoInspectores}
             personas={personasPorId}
+            mostrarSeccion={mostrarSeccion}
             cargando={cargando}
             vacio={
-              inspectores && inspectores.length === 0
-                ? 'No hay inspectores en Administración. Incorporalos en Inspectores y volvé a generar el ciclo.'
-                : 'Nadie coincide con los filtros elegidos.'
+              inspectores && inspectoresVista.length === 0
+                ? 'No hay personas en las cuadraturas elegidas. Incorporalas en Administración o sumá otra cuadratura.'
+                : !board?.days?.length
+                  ? esIdeal
+                    ? 'Todavía no hay ciclo en este período.'
+                    : 'Todavía no hay ciclo real en este período.'
+                  : 'Nadie coincide con los filtros elegidos.'
             }
             seleccion={seleccion}
             contra={esIdeal ? null : boardPlan}
+            soloCambios={!esIdeal && soloCambios}
             onSelect={seleccionar}
+            cubiertoHasta={cubiertoHasta || undefined}
           />
+            </div>
+            {asideVisible ? (
+              <span
+                className="cuad-side-resizer"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label={esIdeal ? 'Ancho del detalle' : 'Ancho de la consola'}
+                title="Arrastrá para agrandar o achicar. Doble clic restaura el tamaño."
+                onMouseDown={beginSideResize}
+                onDoubleClick={() =>
+                  setSideW(clampConsolaW(CONSOLA_W_DEF[capaAncho], topeAnchoConsola()))
+                }
+              />
+            ) : null}
+            {asideVisible ? (
+            <aside className={`cuad-side${esIdeal ? ' is-consulta' : ''}${seleccion ? '' : ' is-empty'}`} aria-label={esIdeal ? 'Detalle de la celda' : 'Consola de la celda'}>
+              <div className="cuad-side-head">
+                <strong>{esIdeal ? 'Detalle' : 'Consola'}</strong>
+                <button
+                  type="button"
+                  className="btn secondary sm"
+                  onClick={() => setConsolaAbierta(false)}
+                >
+                  Ocultar
+                </button>
+              </div>
+              {seleccion ? (
+                <DayDetailPanel
+                  embedded
+                  cell={seleccion.cell}
+                  dateFrom={!esIdeal && cbDesde ? cbDesde : seleccion.dateFrom}
+                  dateTo={!esIdeal && cbHasta ? cbHasta : seleccion.dateTo}
+                  rango={celdasRango}
+                  editable={false}
+                  busy={!!ocupado}
+                  onClose={() => setSeleccion(null)}
+                />
+              ) : null}
+              {!esIdeal ? (
+                    <form className="cuad-change" onSubmit={pedirCambio}>
+                      {diasForm > 0 ? (
+                      <p className="cuad-side-range">
+                        Se aplica a <strong>{diasForm}</strong> día
+                        {diasForm === 1 ? '' : 's'}.
+                      </p>
+                      ) : null}
+                      <div className="field">
+                        <span className="cuad-side-label" id="cb-tipo-label">Qué es</span>
+                        <div
+                          className="plantel-switch cuad-change-switch"
+                          role="tablist"
+                          aria-labelledby="cb-tipo-label"
+                        >
+                          {TIPOS_CAMBIO.map((t) => (
+                            <button
+                              key={t.valor}
+                              type="button"
+                              role="tab"
+                              aria-selected={cbTipo === t.valor}
+                              className={cbTipo === t.valor ? 'active' : undefined}
+                              onClick={() => setCbTipo(t.valor)}
+                            >
+                              {t.etiqueta}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      {cbTipo === 'ENROQUE' ? (
+                        <>
+                          <div className="field">
+                            <label htmlFor="cb-insp">Este</label>
+                            <PeoplePicker
+                              id="cb-insp"
+                              people={inspectoresVista}
+                              value={cbInspector}
+                              allowClear
+                              onChange={(id) => {
+                                setCbInspector(id);
+                                if (id === cbCon) setCbCon('');
+                              }}
+                              placeholder="Buscar legajo, apellido o nombre…"
+                            />
+                          </div>
+                          <div className="field">
+                            <label htmlFor="cb-con">Con</label>
+                            <PeoplePicker
+                              id="cb-con"
+                              people={inspectoresVista.filter((p) => p.id !== cbInspector)}
+                              value={cbCon}
+                              allowClear
+                              onChange={setCbCon}
+                              placeholder="Con quién se enroca…"
+                            />
+                          </div>
+                          {cbInspector ? (
+                            <p className="cuad-enroque-par">
+                              {apellidoYNombre(personaA ?? { nombre_completo: '—' })}
+                              {codigoA ? ` ${codigoA}` : ''}
+                              {' ↔ '}
+                              {cbCon
+                                ? `${apellidoYNombre(personaB ?? { nombre_completo: '—' })}${codigoB ? ` ${codigoB}` : ''}`
+                                : '…'}
+                            </p>
+                          ) : null}
+                        </>
+                      ) : (
+                        <>
+                          <div className="field">
+                            <label htmlFor="cb-insp">{personaRol}</label>
+                            <PeoplePicker
+                              id="cb-insp"
+                              people={inspectoresVista}
+                              value={cbInspector}
+                              allowClear
+                              onChange={setCbInspector}
+                              placeholder={`Buscar ${personaRol.toLowerCase()}, legajo o apellido…`}
+                            />
+                          </div>
+                          <div className="field">
+                            <label htmlFor="cb-cod">Código</label>
+                            <SearchSelect
+                              id="cb-cod"
+                              options={opcionesCodigoBuscar}
+                              value={cbCodigo}
+                              onChange={setCbCodigo}
+                              placeholder="Buscar código…"
+                              emptyLabel="Ningún código coincide"
+                            />
+                          </div>
+                        </>
+                      )}
+                      <p className="cuad-side-period-hint">
+                        Persona sin fechas = filas · Fechas sin persona = columnas. Shift+clic o
+                        arrastre para un rango.
+                      </p>
+                      <div className="cuad-side-dates">
+                        <div className="field">
+                          <label htmlFor="cb-desde">Desde</label>
+                          <DateField
+                            id="cb-desde"
+                            aria-label="Desde"
+                            allowClear
+                            value={cbDesde}
+                            onChange={(v) => (v ? setRangoForm(v, cbHasta || v) : setRangoForm('', ''))}
+                          />
+                        </div>
+                        <div className="field">
+                          <label htmlFor="cb-hasta">Hasta</label>
+                          <DateField
+                            id="cb-hasta"
+                            aria-label="Hasta"
+                            allowClear
+                            value={cbHasta}
+                            onChange={(v) => (v ? setRangoForm(cbDesde || v, v) : setRangoForm('', ''))}
+                          />
+                        </div>
+                      </div>
+                      <div className="field">
+                        <label htmlFor="cb-motivo">Motivo</label>
+                        <SearchSelect
+                          id="cb-motivo"
+                          options={motivosCat.map((m) => ({
+                            id: m.nombre,
+                            label: m.nombre,
+                          }))}
+                          value={cbMotivo}
+                          onChange={setCbMotivo}
+                          allowClear
+                          placeholder="Elegí un motivo…"
+                          emptyLabel="Ningún motivo coincide"
+                        />
+                      </div>
+                      <div className="field">
+                        <label htmlFor="cb-obs">Observaciones</label>
+                        <textarea
+                          id="cb-obs"
+                          rows={2}
+                          placeholder="Opcional"
+                          value={cbObservacion}
+                          onChange={(e) => setCbObservacion(e.target.value)}
+                        />
+                      </div>
+                      <div className="cuad-change-actions">
+                        <button
+                          type="button"
+                          className="btn secondary sm"
+                          disabled={
+                            !!ocupado ||
+                            (!cbInspector &&
+                              filtroInspectores.length === 0 &&
+                              (!cbDesde || !cbHasta))
+                          }
+                          onClick={pedirVolverIdeal}
+                        >
+                          Volver a Ideal
+                        </button>
+                        <button
+                          type="submit"
+                          className="btn primary sm"
+                          disabled={!!ocupado || !!validarCambio()}
+                        >
+                          {ocupado
+                            ? ocupado
+                            : `${accionForm}${diasForm ? ` ${diasForm} día${diasForm === 1 ? '' : 's'}` : ''}`}
+                        </button>
+                      </div>
+                    </form>
+              ) : null}
+            </aside>
+            ) : null}
+          </div>
         </section>
       )}
 
-      <section
-        className={`panel cuad-dock${dockResizing ? ' is-resizing' : ''}`}
-        style={{ height: dockH }}
-        aria-label="Detalle del día"
-      >
-        <button
-          type="button"
-          className="cuad-dock-resizer"
-          aria-label="Cambiar alto del panel"
-          title="Arrastrá para cambiar el alto. Doble clic restaura el tamaño."
-          aria-orientation="horizontal"
-          aria-valuemin={DOCK_MIN}
-          aria-valuemax={DOCK_MAX}
-          aria-valuenow={dockH}
-          onMouseDown={beginDock}
-          onDoubleClick={() => guardarDock(DOCK_DEFAULT)}
-          onKeyDown={onDockKey}
-        />
-        <div className="cuad-dock-body">
-          <DayDetailPanel
-            embedded
-            cell={seleccion?.cell ?? null}
-            dateFrom={seleccion?.dateFrom ?? null}
-            dateTo={seleccion?.dateTo}
-            editable={!esIdeal}
-            busy={!!ocupado}
-            licencias={licenciasActivas}
-            moviles={movilesActivos}
-            onClose={() => setSeleccion(null)}
-            onLicencia={esIdeal ? undefined : aplicarLicencia}
-            onTurnoMovil={esIdeal ? undefined : aplicarTurnoMovil}
-          >
-            {esIdeal ? null : (
-              <form className="cuad-change" onSubmit={aplicarCambio}>
-                <div className="field cuad-bar-grow">
-                  <label htmlFor="cb-insp">Inspector</label>
-                  <PeoplePicker
-                    id="cb-insp"
-                    people={inspectores ?? []}
-                    value={cbInspector}
-                    onChange={setCbInspector}
-                    placeholder="Buscar legajo, apellido o nombre…"
+      <OcupacionPackProvider from={desdeVista} to={hastaVista} enabled>
+        <div className="cuad-paneles">
+          {paneles
+            .filter((p) => p.visible && (p.id !== 'timer' || !esIdeal))
+            .map((p) => (
+              <div key={p.id} className="cuad-paneles-item">
+                {p.id === 'timer' ? (
+                  <TimerBoard
+                    from={desdeVista}
+                    to={hastaVista}
+                    plan={boardPlan}
+                    real={boardReal}
+                    people={inspectoresVista}
                   />
-                </div>
-                <div className="field">
-                  <label htmlFor="cb-tipo">Tipo</label>
-                  <select
-                    id="cb-tipo"
-                    value={cbTipo}
-                    onChange={(e) => setCbTipo(e.target.value as TipoCambio)}
-                  >
-                    {TIPOS_CAMBIO.map((t) => (
-                      <option key={t.valor} value={t.valor}>
-                        {t.etiqueta}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                {cbTipo === 'LICENCIA' && (
-                  <div className="field">
-                    <label htmlFor="cb-lic">Tipo de licencia</label>
-                    <select
-                      id="cb-lic"
-                      value={cbLicencia}
-                      onChange={(e) => setCbLicencia(e.target.value)}
-                    >
-                      <option value="">Elegí…</option>
-                      {licenciasActivas.map((l) => (
-                        <option key={l.id} value={l.id}>
-                          {l.nombre}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                ) : (
+                  <OcupacionBoard
+                    from={desdeVista}
+                    to={hastaVista}
+                    enabled
+                    parte={p.id === 'ocupacion' ? 'ocupacion' : 'desdobles'}
+                  />
                 )}
-                <div className="field">
-                  <label htmlFor="cb-desde">Desde</label>
-                  <input
-                    id="cb-desde"
-                    type="date"
-                    value={cbDesde}
-                    onChange={(e) => setCbDesde(e.target.value)}
-                  />
-                </div>
-                <div className="field">
-                  <label htmlFor="cb-hasta">Hasta</label>
-                  <input
-                    id="cb-hasta"
-                    type="date"
-                    value={cbHasta}
-                    onChange={(e) => setCbHasta(e.target.value)}
-                  />
-                </div>
-                {cbTipo === 'TURNO_MOVIL' && (
-                  <>
-                    <div className="field">
-                      <label htmlFor="cb-turno">Turno</label>
-                      <select
-                        id="cb-turno"
-                        value={cbTurno}
-                        onChange={(e) => setCbTurno(e.target.value as '' | 'M' | 'T' | 'N')}
-                      >
-                        <option value="">Sin cambio</option>
-                        <option value="M">Mañana</option>
-                        <option value="T">Tarde</option>
-                        <option value="N">Noche</option>
-                      </select>
-                    </div>
-                    <div className="field">
-                      <label htmlFor="cb-movil">Móvil</label>
-                      <select
-                        id="cb-movil"
-                        value={cbMovil}
-                        onChange={(e) => setCbMovil(e.target.value)}
-                      >
-                        <option value="">Sin cambio</option>
-                        {movilesActivos.map((m) => (
-                          <option key={m} value={m}>
-                            {m}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </>
-                )}
-                <div className="field cuad-bar-grow">
-                  <label htmlFor="cb-motivo">Motivo</label>
-                  <input
-                    id="cb-motivo"
-                    type="text"
-                    placeholder="Opcional"
-                    value={cbMotivo}
-                    onChange={(e) => setCbMotivo(e.target.value)}
-                  />
-                </div>
-                <div className="cuad-bar-actions">
-                  <button type="submit" className="btn primary" disabled={!!ocupado}>
-                    Registrar
-                  </button>
-                </div>
-              </form>
-            )}
-          </DayDetailPanel>
+              </div>
+            ))}
         </div>
-      </section>
+      </OcupacionPackProvider>
+      </>
+      )}
+
+      <Modal
+        open={Boolean(exportPendiente)}
+        onClose={() => setExportPendiente(null)}
+        title={exportPendiente === 'planillas' ? 'Excel de planillas' : 'Excel de la cuadratura'}
+        description="Hay filtros aplicados. ¿Querés el Excel solo con eso, o todo el período?"
+        size="sm"
+        footer={
+          <>
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={() => setExportPendiente(null)}
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={() => exportPendiente && void exportar(exportPendiente, false)}
+            >
+              Todo
+            </button>
+            <button
+              type="button"
+              className="btn primary"
+              onClick={() => exportPendiente && void exportar(exportPendiente, true)}
+            >
+              Con filtros
+            </button>
+          </>
+        }
+      >
+        {resumenFiltrosExport.length ? (
+          <p>{resumenFiltrosExport.join(' · ')}</p>
+        ) : null}
+      </Modal>
+
+      <ConfirmDialog
+        open={confirmKind === 'cambio'}
+        title="Confirmar cambio"
+        message={
+          cbTipo === 'ENROQUE'
+            ? `Vas a enrocar ${apellidoYNombre(personaA ?? { nombre_completo: '—' })} con ${apellidoYNombre(personaB ?? { nombre_completo: '—' })} del ${isoToDmy(cbDesde)} al ${isoToDmy(cbHasta)} (${diasForm} día${diasForm === 1 ? '' : 's'}). Se escribe en Real; la Ideal no se toca.`
+            : `Vas a aplicar ${opcionesCodigo.find((o) => o.valor === cbCodigo)?.etiqueta ?? 'el código'} a ${apellidoYNombre(personaA ?? { nombre_completo: '—' })} del ${isoToDmy(cbDesde)} al ${isoToDmy(cbHasta)} (${diasForm} día${diasForm === 1 ? '' : 's'}). Se escribe en Real; la Ideal no se toca.`
+        }
+        confirmLabel={accionForm}
+        cancelLabel="Cancelar"
+        onCancel={() => setConfirmKind(null)}
+        onConfirm={async () => {
+          setConfirmKind(null);
+          await ejecutarCambio();
+        }}
+      />
+      <ConfirmDialog
+        open={confirmKind === 'ideal'}
+        title="Volver a Ideal"
+        message={idealPendiente?.mensaje ?? ''}
+        confirmLabel="Aplicar"
+        cancelLabel="Cancelar"
+        tone={idealPendiente?.kind === 'columnas' ? 'danger' : 'default'}
+        onCancel={() => {
+          setConfirmKind(null);
+          setIdealPendiente(null);
+        }}
+        onConfirm={async () => {
+          const ok = await ejecutarVolverIdeal(idealPendiente);
+          if (!ok) return;
+          setConfirmKind(null);
+          setIdealPendiente(null);
+        }}
+      />
     </div>
   );
 }

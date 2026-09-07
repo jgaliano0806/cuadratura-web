@@ -52,7 +52,7 @@ export class IdentityService {
 
   async getRoles(userId: string): Promise<RoleCode[]> {
     const result = await this.db.query<{ codigo: string }>(
-      `SELECT r.codigo
+      `SELECT DISTINCT r.codigo
        FROM seguridad_vial.usuario_rol ur
        JOIN seguridad_vial.rol r ON r.id = ur.rol_id
        WHERE ur.usuario_id = $1

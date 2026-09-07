@@ -68,12 +68,17 @@ export type OpcionesDesdoble = {
    * Si la pareja directa no tiene lugar, prueba con los demás móviles de la
    * MISMA franja horaria.
    *
-   * Nunca sale de la franja: mover a un móvil de otro horario le cambiaría la
-   * hora de entrada al inspector, y eso no se hace automáticamente. Si no queda
-   * ningún destino con el mismo horario, el caso se devuelve como SIN_DESTINO
-   * para que lo resuelva una persona.
+   * Sin `permitirCruzarFranja`, nunca sale de la franja: mover a un móvil de
+   * otro horario le cambiaría la hora de entrada. Si no queda destino con el
+   * mismo horario, el caso queda SIN_DESTINO.
    */
   cualquierMovilDelTurno?: boolean;
+  /**
+   * Último recurso (Ideal): si la franja propia está completa, usa cualquier
+   * móvil del mismo turno con lugar aunque cambie la hora de entrada.
+   * Sin esto, un mes con más gente en temprana que cupos (6) no se materializa.
+   */
+  permitirCruzarFranja?: boolean;
 };
 
 type Contexto = {
@@ -141,7 +146,7 @@ function motivoResuelto(
       : `es el que menos veces fue desdoblado (${veces} previas)`;
   const destinoTxt = mismoHorario
     ? `al móvil ${destino}, que comparte el mismo horario de entrada`
-    : `al móvil ${destino} del mismo turno (la pareja de la misma franja ya estaba llena)`;
+    : `al móvil ${destino} del mismo turno (franja completa: cambia hora de entrada solo ese día)`;
   return (
     `Tres inspectores asignados al móvil ${origen} en el turno ${turno}. ` +
     `Se movió a ${movido} ${destinoTxt}, conservando el turno. ` +
@@ -180,6 +185,7 @@ export function resolverSuperposiciones(
 ): { days: ProjectedDay[]; desdobles: Desdoble[] } {
   const permitirMovil4 = opciones.permitirMovil4 ?? false;
   const cualquierMovilDelTurno = opciones.cualquierMovilDelTurno ?? false;
+  const permitirCruzarFranja = opciones.permitirCruzarFranja ?? false;
   const resultado = days.map((d) => ({ ...d }));
   const desdobles: Desdoble[] = [];
 
@@ -203,6 +209,11 @@ export function resolverSuperposiciones(
 
   const fechas = [...new Set(resultado.map((d) => d.date))].sort();
   const turnos: ShiftCode[] = ['M', 'N', 'T'];
+  const todosMoviles = Object.keys(FRANJA).map(Number).sort((a, b) => a - b);
+
+  function conCupo(fecha: string, m: number, turno: ShiftCode): boolean {
+    return (porSlot.get(claveSlot(fecha, m, turno)) ?? []).length < CUPO_POR_MOVIL;
+  }
 
   function destinosConLugar(
     fecha: string,
@@ -218,17 +229,18 @@ export function resolverSuperposiciones(
       push(MOVIL_MANUAL);
     }
     if (cualquierMovilDelTurno) {
-      // Solo móviles con el MISMO horario de entrada. Salir de la franja le
-      // cambiaría la hora al inspector: eso queda para resolución manual.
       for (const [n, franja] of Object.entries(FRANJA)) {
         if (franja === FRANJA[movil]) push(Number(n));
       }
     }
-    return ordered.filter(
-      (m) =>
-        FRANJA[m] === FRANJA[movil] &&
-        (porSlot.get(claveSlot(fecha, m, turno)) ?? []).length < CUPO_POR_MOVIL,
+    const mismaFranja = ordered.filter(
+      (m) => FRANJA[m] === FRANJA[movil] && conCupo(fecha, m, turno),
     );
+    if (mismaFranja.length || !permitirCruzarFranja) return mismaFranja;
+
+    // Último recurso: otro móvil del mismo turno (cambia hora de entrada).
+    for (const m of todosMoviles) push(m);
+    return ordered.filter((m) => conCupo(fecha, m, turno));
   }
 
   for (const fecha of fechas) {

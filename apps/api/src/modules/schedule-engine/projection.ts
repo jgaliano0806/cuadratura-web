@@ -46,6 +46,9 @@ export type ProjectionInput = {
    * Se conserva para no romper los llamadores; se puede eliminar.
    */
   completedBlocksOnMobile?: number;
+  /** Si hay vigencia de asignación, no se emiten días fuera de ese intervalo. */
+  assignedFrom?: string | null;
+  assignedTo?: string | null;
 };
 
 export type ProjectedDay = {
@@ -297,7 +300,10 @@ export function projectRange(
 
   const out: ProjectedDay[] = [];
   while (state.date <= dateTo) {
-    if (state.date >= dateFrom) {
+    const enAsignacion =
+      (!input.assignedFrom || state.date >= input.assignedFrom) &&
+      (!input.assignedTo || state.date <= input.assignedTo);
+    if (state.date >= dateFrom && enAsignacion) {
       out.push(dayFromState(state, meta));
     }
     if (state.date === dateTo) break;

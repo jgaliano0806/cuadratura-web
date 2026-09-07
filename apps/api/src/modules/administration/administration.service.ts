@@ -80,6 +80,7 @@ export class AdministrationService {
               i.apellido,
               i.nombre_completo,
               i.tipo_plantel,
+              i.seccion,
               i.estado,
               a.fecha_desde::text AS vigencia_desde,
               p.codigo AS posicion_codigo,
@@ -334,6 +335,7 @@ export class AdministrationService {
     tipoPlantel?: 'TITULAR' | 'REEMPLAZANTE' | 'PEAJISTA';
     fechaDesde?: string;
     posicionId?: string;
+    seccion?: string;
     userId?: string;
   }) {
     const nombres = input.nombres.trim();
@@ -343,25 +345,28 @@ export class AdministrationService {
       throw new BadRequestException('Nombre, apellido y legajo son obligatorios');
     }
     const plantel = input.tipoPlantel ?? 'TITULAR';
+    const seccion = input.seccion ?? 'MOVILES';
     const fechaAlta = input.fechaDesde ?? null;
     try {
       const result = await this.db.query(
         `INSERT INTO seguridad_vial.inspector (
-           legajo, nombres, apellido, nombre_completo, tipo_plantel, fecha_alta
+           legajo, nombres, apellido, nombre_completo, tipo_plantel, seccion, fecha_alta
          ) VALUES (
-           $1, $2, $3, $4, $5::seguridad_vial.tipo_plantel,
+           $1, $2, $3, $4, $5::seguridad_vial.tipo_plantel, $7,
            coalesce($6::date, current_date)
          )
-         RETURNING id, legajo, nombres, apellido, nombre_completo, tipo_plantel, estado,
+         RETURNING id, legajo, nombres, apellido, nombre_completo, tipo_plantel, seccion, estado,
                    fecha_alta::text AS fecha_alta`,
-        [legajo, nombres, apellido, nombreCompleto(apellido, nombres), plantel, fechaAlta],
+        [legajo, nombres, apellido, nombreCompleto(apellido, nombres), plantel, fechaAlta, seccion],
       );
       const created = result.rows[0];
+      const desde = fechaAlta ?? new Date().toISOString().slice(0, 10);
+      await this.abrirSeccion(created.id, seccion, desde, 'Alta de inspector');
       if (input.posicionId) {
         await this.assignPosition({
           inspectorId: created.id,
           posicionId: input.posicionId,
-          fechaDesde: fechaAlta ?? new Date().toISOString().slice(0, 10),
+          fechaDesde: desde,
           motivo: 'Alta de inspector',
           userId: input.userId,
         });
@@ -384,11 +389,17 @@ export class AdministrationService {
       tipoPlantel?: 'TITULAR' | 'REEMPLAZANTE' | 'PEAJISTA';
       posicionId?: string;
       fechaDesde?: string;
+      seccion?: string;
       userId?: string;
     },
   ) {
-    const current = await this.db.query(
-      `SELECT id, nombres, apellido FROM seguridad_vial.inspector WHERE id = $1`,
+    const current = await this.db.query<{
+      id: string;
+      nombres: string | null;
+      apellido: string | null;
+      seccion: string | null;
+    }>(
+      `SELECT id, nombres, apellido, seccion FROM seguridad_vial.inspector WHERE id = $1`,
       [id],
     );
     if (!current.rows[0]) throw new NotFoundException('Inspector no encontrado');
@@ -412,9 +423,10 @@ export class AdministrationService {
              nombre_completo = coalesce($4, nombre_completo),
              legajo = coalesce($5, legajo),
              tipo_plantel = coalesce($6::seguridad_vial.tipo_plantel, tipo_plantel),
+             seccion = coalesce($7, seccion),
              actualizado_en = now()
          WHERE id = $1
-         RETURNING id, legajo, nombres, apellido, nombre_completo, tipo_plantel, estado`,
+         RETURNING id, legajo, nombres, apellido, nombre_completo, tipo_plantel, seccion, estado`,
         [
           id,
           nombres || null,
@@ -422,9 +434,18 @@ export class AdministrationService {
           completo,
           legajo || null,
           input.tipoPlantel ?? null,
+          input.seccion ?? null,
         ],
       );
-      if (input.posicionId && input.fechaDesde) {
+      const desde = input.fechaDesde ?? new Date().toISOString().slice(0, 10);
+      if (input.seccion && input.seccion !== (current.rows[0].seccion || 'MOVILES')) {
+        await this.abrirSeccion(id, input.seccion, desde, 'Cambio de sección');
+        if (input.seccion !== 'MOVILES') {
+          await this.cerrarPosicionVigente(id, desde);
+        }
+      }
+      const seccionFinal = input.seccion ?? current.rows[0].seccion ?? 'MOVILES';
+      if (input.posicionId && input.fechaDesde && seccionFinal === 'MOVILES') {
         await this.assignPosition({
           inspectorId: id,
           posicionId: input.posicionId,
@@ -449,8 +470,9 @@ export class AdministrationService {
     );
     if (!current.rows[0]) throw new NotFoundException('Inspector no encontrado');
     const baja = fechaBaja ?? new Date().toISOString().slice(0, 10);
+    await this.cerrarPosicionVigente(id, baja);
     await this.db.query(
-      `UPDATE seguridad_vial.asignacion_inspector_posicion
+      `UPDATE seguridad_vial.inspector_seccion_periodo
        SET fecha_hasta = least(coalesce(fecha_hasta, $2::date), $2::date)
        WHERE inspector_id = $1 AND $2::date <@ vigencia`,
       [id, baja],
@@ -473,6 +495,7 @@ export class AdministrationService {
       `SELECT p.id,
               p.codigo,
               p.tipo,
+              pr.id AS perfil_id,
               pr.nombre AS perfil,
               (
                 SELECT coalesce(string_agg(pt.turno::text, '→' ORDER BY pt.orden), '—')
@@ -500,6 +523,355 @@ export class AdministrationService {
        ORDER BY i.nombre_completo NULLS FIRST, p.codigo`,
     );
     return result.rows;
+  }
+
+  async createPosition(input: {
+    tipo?: 'GENERAL' | 'MOVIL4' | 'MOVIL6' | 'MOVIL7';
+    perfilId?: string;
+    fechaDesde?: string;
+    moviles?: number[];
+    turnos?: Array<'M' | 'N' | 'T'>;
+  }) {
+    const spec: Record<
+      'GENERAL' | 'MOVIL4' | 'MOVIL6' | 'MOVIL7',
+      { re: RegExp; perfil: string; etiqueta: string; codigo: (n: string) => string }
+    > = {
+      GENERAL: {
+        re: /^GEN-(\d+)$/i,
+        perfil: 'ROTACION_GENERAL',
+        etiqueta: 'Rotación',
+        codigo: (n) => `GEN-${n}`,
+      },
+      MOVIL4: {
+        re: /^M4-P(\d+)$/i,
+        perfil: 'MOVIL4_FIJO',
+        etiqueta: 'Móvil 4',
+        codigo: (n) => `M4-P${n}`,
+      },
+      MOVIL6: {
+        re: /^M6-P(\d+)$/i,
+        perfil: 'MOVIL6_FIJO',
+        etiqueta: 'Móvil 6',
+        codigo: (n) => `M6-P${n}`,
+      },
+      MOVIL7: {
+        re: /^M7-P(\d+)$/i,
+        perfil: 'MOVIL7_FIJO',
+        etiqueta: 'Móvil 7',
+        codigo: (n) => `M7-P${n}`,
+      },
+    };
+    const desde = input.fechaDesde?.slice(0, 10) || new Date().toISOString().slice(0, 10);
+    const nums = (input.moviles ?? []).filter((n) => Number.isInteger(n) && n > 0);
+    const turnosIn = (input.turnos ?? []).filter(
+      (t): t is 'M' | 'N' | 'T' => t === 'M' || t === 'N' || t === 'T',
+    );
+
+    let tipo = input.tipo;
+    let perfilId = input.perfilId ?? '';
+
+    if (nums.length && turnosIn.length) {
+      const hallado = await this.db.query<{ id: string }>(
+        `SELECT pr.id
+         FROM seguridad_vial.perfil_rotacion pr
+         WHERE pr.estado = 'ACTIVO'
+           AND (
+             SELECT coalesce(string_agg(pt.turno::text, ',' ORDER BY pt.orden), '')
+             FROM seguridad_vial.perfil_rotacion_turno pt WHERE pt.perfil_id = pr.id
+           ) = $1
+           AND (
+             SELECT coalesce(string_agg(m.numero::text, ',' ORDER BY pm.orden), '')
+             FROM seguridad_vial.perfil_rotacion_movil pm
+             JOIN seguridad_vial.movil m ON m.id = pm.movil_id
+             WHERE pm.perfil_id = pr.id
+           ) = $2
+         LIMIT 1`,
+        [turnosIn.join(','), nums.join(',')],
+      );
+      if (hallado.rows[0]) {
+        perfilId = hallado.rows[0].id;
+      } else {
+        const movilRows = await this.db.query<{ id: string; numero: number }>(
+          `SELECT id, numero FROM seguridad_vial.movil
+           WHERE numero = ANY($1::int[]) AND estado = 'ACTIVO'`,
+          [nums],
+        );
+        const byNum = new Map(movilRows.rows.map((m) => [m.numero, m.id]));
+        const missing = nums.filter((n) => !byNum.has(n));
+        if (missing.length) {
+          throw new BadRequestException(`No están esos móviles: ${missing.join(', ')}`);
+        }
+        const tipoCfg = nums.length === 1 ? 'FIJO_MOVIL' : 'GENERAL';
+        const baseCodigo = `ROT_${nums.join('_')}_${turnosIn.join('')}`;
+        const createdPerfil = await this.db.withClient(async (client) => {
+          let codigo = baseCodigo;
+          for (let i = 0; i < 20; i += 1) {
+            const dup = await client.query(
+              `SELECT 1 FROM seguridad_vial.perfil_rotacion WHERE codigo = $1`,
+              [codigo],
+            );
+            if (!dup.rows[0]) break;
+            codigo = `${baseCodigo}_${i + 2}`;
+          }
+          const ins = await client.query<{ id: string }>(
+            `INSERT INTO seguridad_vial.perfil_rotacion (
+               codigo, nombre, tipo, vigencia_desde, estado
+             ) VALUES ($1, $2, $3::seguridad_vial.tipo_configuracion, $4::date, 'ACTIVO')
+             RETURNING id`,
+            [
+              codigo,
+              `Rotación ${nums.join('→')} / ${turnosIn.join('→')}`,
+              tipoCfg,
+              desde,
+            ],
+          );
+          const id = ins.rows[0].id;
+          for (let i = 0; i < turnosIn.length; i += 1) {
+            await client.query(
+              `INSERT INTO seguridad_vial.perfil_rotacion_turno (perfil_id, orden, turno)
+               VALUES ($1, $2, $3::seguridad_vial.turno_codigo)`,
+              [id, i + 1, turnosIn[i]],
+            );
+          }
+          for (let i = 0; i < nums.length; i += 1) {
+            await client.query(
+              `INSERT INTO seguridad_vial.perfil_rotacion_movil (perfil_id, orden, movil_id)
+               VALUES ($1, $2, $3::uuid)`,
+              [id, i + 1, byNum.get(nums[i])],
+            );
+          }
+          return id;
+        });
+        perfilId = createdPerfil;
+      }
+      tipo =
+        tipo ??
+        (nums.length === 1 && nums[0] === 4
+          ? 'MOVIL4'
+          : nums.length === 1 && nums[0] === 6
+            ? 'MOVIL6'
+            : nums.length === 1 && nums[0] === 7
+              ? 'MOVIL7'
+              : 'GENERAL');
+    }
+
+    if (!perfilId && tipo) {
+      const plantilla = await this.db.query<{ perfil_rotacion_id: string }>(
+        `SELECT perfil_rotacion_id
+         FROM seguridad_vial.posicion_cuadratura
+         WHERE tipo = $1::seguridad_vial.tipo_posicion AND estado = 'ACTIVO'
+         ORDER BY codigo
+         LIMIT 1`,
+        [tipo],
+      );
+      if (plantilla.rows[0]) {
+        perfilId = plantilla.rows[0].perfil_rotacion_id;
+      } else {
+        const perfil = await this.db.query<{ id: string }>(
+          `SELECT id FROM seguridad_vial.perfil_rotacion
+           WHERE codigo = $1 AND estado = 'ACTIVO'`,
+          [spec[tipo].perfil],
+        );
+        if (!perfil.rows[0]) {
+          throw new BadRequestException(`No hay perfil para ${spec[tipo].etiqueta}`);
+        }
+        perfilId = perfil.rows[0].id;
+      }
+    }
+
+    if (!perfilId) {
+      throw new BadRequestException('Indicá la secuencia (perfil) o el ciclo de móviles y turnos');
+    }
+
+    if (!tipo) {
+      const dePerfil = await this.db.query<{ tipo: string; n: number }>(
+        `SELECT p.tipo::text AS tipo, count(*)::int AS n
+         FROM seguridad_vial.posicion_cuadratura p
+         WHERE p.perfil_rotacion_id = $1
+         GROUP BY p.tipo
+         ORDER BY n DESC
+         LIMIT 1`,
+        [perfilId],
+      );
+      const t = dePerfil.rows[0]?.tipo;
+      tipo =
+        t === 'MOVIL4' || t === 'MOVIL6' || t === 'MOVIL7' || t === 'GENERAL'
+          ? t
+          : 'GENERAL';
+    }
+
+    const head = await this.db.query<{
+      turno: string | null;
+      movil_id: string | null;
+    }>(
+      `SELECT (SELECT pt.turno::text FROM seguridad_vial.perfil_rotacion_turno pt
+                WHERE pt.perfil_id = $1 ORDER BY pt.orden LIMIT 1) AS turno,
+              (SELECT pm.movil_id::text FROM seguridad_vial.perfil_rotacion_movil pm
+                WHERE pm.perfil_id = $1 ORDER BY pm.orden LIMIT 1) AS movil_id`,
+      [perfilId],
+    );
+    const turno = head.rows[0]?.turno ?? null;
+    const movilId = head.rows[0]?.movil_id ?? null;
+    const cfg = spec[tipo];
+
+    const existentes = await this.db.query<{ codigo: string }>(
+      `SELECT codigo FROM seguridad_vial.posicion_cuadratura
+       WHERE tipo = $1::seguridad_vial.tipo_posicion`,
+      [tipo],
+    );
+    let max = 0;
+    let pad = 2;
+    for (const row of existentes.rows) {
+      const m = cfg.re.exec(row.codigo);
+      if (!m) continue;
+      max = Math.max(max, Number(m[1]));
+      pad = Math.max(pad, m[1].length);
+    }
+    const codigo = cfg.codigo(String(max + 1).padStart(pad, '0'));
+
+    const created = await this.db.withClient(async (client) => {
+      const gf = await client.query<{ id: string }>(
+        `INSERT INTO seguridad_vial.grupo_franco (
+           codigo, nombre, fecha_ancla, posicion_inicial_ciclo, origen_ancla
+         ) VALUES ($1, $2, $3::date, 0, 'CONFIGURACION')
+         RETURNING id`,
+        [`GF-${codigo}`, `Grupo ${codigo}`, desde],
+      );
+      const pos = await client.query<{ id: string }>(
+        `INSERT INTO seguridad_vial.posicion_cuadratura (
+           codigo, nombre, tipo, grupo_franco_id, perfil_rotacion_id,
+           fecha_ancla, posicion_inicial_ciclo, turno_inicial, movil_inicial_id,
+           desfase_dias_referencia, origen_ancla, vigencia_desde
+         ) VALUES (
+           $1, $2, $3::seguridad_vial.tipo_posicion, $4, $5,
+           $6::date, 0, $7::seguridad_vial.turno_codigo, $8::uuid,
+           0, 'CONFIGURACION', $6::date
+         )
+         RETURNING id`,
+        [
+          codigo,
+          `${cfg.etiqueta} ${codigo}`,
+          tipo,
+          gf.rows[0].id,
+          perfilId,
+          desde,
+          turno,
+          movilId,
+        ],
+      );
+      return pos.rows[0].id;
+    });
+
+    const row = await this.db.query(
+      `SELECT p.id,
+              p.codigo,
+              p.tipo,
+              pr.id AS perfil_id,
+              pr.nombre AS perfil,
+              (
+                SELECT coalesce(string_agg(pt.turno::text, '→' ORDER BY pt.orden), '—')
+                FROM seguridad_vial.perfil_rotacion_turno pt WHERE pt.perfil_id = pr.id
+              ) AS turnos,
+              (
+                SELECT coalesce(string_agg(m.numero::text, '→' ORDER BY pm.orden), '—')
+                FROM seguridad_vial.perfil_rotacion_movil pm
+                JOIN seguridad_vial.movil m ON m.id = pm.movil_id
+                WHERE pm.perfil_id = pr.id
+              ) AS moviles,
+              NULL::uuid AS ocupante_id,
+              NULL::text AS ocupante
+       FROM seguridad_vial.posicion_cuadratura p
+       JOIN seguridad_vial.perfil_rotacion pr ON pr.id = p.perfil_rotacion_id
+       WHERE p.id = $1`,
+      [created],
+    );
+    return row.rows[0];
+  }
+
+  async historialInspector(id: string) {
+    const head = await this.db.query(
+      `SELECT id, legajo, nombres, apellido, nombre_completo, seccion, estado
+       FROM seguridad_vial.inspector WHERE id = $1`,
+      [id],
+    );
+    if (!head.rows[0]) throw new NotFoundException('Inspector no encontrado');
+    const filas = await this.db.query<{
+      origen: string;
+      seccion: string;
+      fecha_desde: string;
+      fecha_hasta: string | null;
+      posicion_codigo: string | null;
+      posicion_etiqueta: string | null;
+      motivo: string;
+    }>(
+      `SELECT 'secuencia' AS origen,
+              'MOVILES' AS seccion,
+              a.fecha_desde::text AS fecha_desde,
+              a.fecha_hasta::text AS fecha_hasta,
+              p.codigo AS posicion_codigo,
+              CASE
+                WHEN p.tipo = 'MOVIL4' THEN 'Móvil 4 · ' || p.codigo
+                WHEN p.tipo = 'MOVIL6' THEN 'Ruta 36 · Móvil 6 · ' || p.codigo
+                WHEN p.tipo = 'MOVIL7' THEN 'Ruta 36 · Móvil 7 · ' || p.codigo
+                ELSE 'Rotación · ' || p.codigo
+              END AS posicion_etiqueta,
+              a.motivo
+       FROM seguridad_vial.asignacion_inspector_posicion a
+       JOIN seguridad_vial.posicion_cuadratura p ON p.id = a.posicion_id
+       WHERE a.inspector_id = $1
+       UNION ALL
+       SELECT 'seccion' AS origen,
+              s.seccion,
+              s.fecha_desde::text,
+              s.fecha_hasta::text,
+              NULL,
+              NULL,
+              s.motivo
+       FROM seguridad_vial.inspector_seccion_periodo s
+       WHERE s.inspector_id = $1
+         AND s.seccion <> 'MOVILES'
+       ORDER BY 3 DESC, 4 DESC NULLS FIRST`,
+      [id],
+    );
+    return { inspector: head.rows[0], filas: filas.rows };
+  }
+
+  private async abrirSeccion(
+    inspectorId: string,
+    seccion: string,
+    fechaDesde: string,
+    motivo: string,
+  ) {
+    await this.db.query(
+      `DELETE FROM seguridad_vial.inspector_seccion_periodo
+       WHERE inspector_id = $1
+         AND fecha_desde >= $2::date
+         AND $2::date <@ vigencia`,
+      [inspectorId, fechaDesde],
+    );
+    await this.db.query(
+      `UPDATE seguridad_vial.inspector_seccion_periodo
+       SET fecha_hasta = $2::date - 1
+       WHERE inspector_id = $1
+         AND $2::date <@ vigencia
+         AND fecha_desde < $2::date`,
+      [inspectorId, fechaDesde],
+    );
+    await this.db.query(
+      `INSERT INTO seguridad_vial.inspector_seccion_periodo (
+         inspector_id, seccion, fecha_desde, motivo
+       ) VALUES ($1, $2, $3::date, $4)`,
+      [inspectorId, seccion, fechaDesde, motivo],
+    );
+  }
+
+  private async cerrarPosicionVigente(inspectorId: string, fecha: string) {
+    await this.db.query(
+      `UPDATE seguridad_vial.asignacion_inspector_posicion
+       SET fecha_hasta = least(coalesce(fecha_hasta, $2::date), $2::date)
+       WHERE inspector_id = $1 AND $2::date <@ vigencia`,
+      [inspectorId, fecha],
+    );
   }
 
   private async assignPosition(input: {
@@ -551,9 +923,10 @@ export class AdministrationService {
 
   async listLicencias() {
     const result = await this.db.query(
-      `SELECT id, codigo, nombre, activo, orden, color_fondo, color_letra
+      `SELECT id, codigo, codigo_sap, nombre, horario, ambito, tipo,
+              activo, orden, color_fondo, color_letra
        FROM seguridad_vial.catalogo_licencia
-       ORDER BY orden, nombre`,
+       ORDER BY ambito, tipo, orden, codigo`,
     );
     return result.rows;
   }
@@ -561,34 +934,55 @@ export class AdministrationService {
   async createLicencia(input: {
     nombre: string;
     codigo?: string;
+    codigo_sap?: string | null;
+    horario?: string | null;
+    ambito?: string;
+    tipo?: string;
     color_fondo?: string | null;
     color_letra?: string | null;
   }) {
     const nombre = input.nombre.trim();
     if (!nombre) {
-      throw new BadRequestException('El nombre de la licencia es obligatorio');
+      throw new BadRequestException('La descripción del código es obligatoria');
     }
-    const codigo = input.codigo?.trim() || slugCodigo(nombre);
+    const codigo = (input.codigo?.trim() || slugCodigo(nombre)).toUpperCase();
     if (!codigo) {
-      throw new BadRequestException('No se pudo armar un código para esa licencia');
+      throw new BadRequestException('No se pudo armar un código');
     }
+    const ambito = input.ambito === 'BASE_OPERACIONES' ? 'BASE_OPERACIONES' : 'SEGURIDAD_VIAL';
+    const tipo = ['TURNO', 'AUSENCIA', 'FRANCO', 'OTRO'].includes(input.tipo ?? '')
+      ? input.tipo
+      : 'AUSENCIA';
     const colorFondo = colorHex(input.color_fondo);
     const colorLetra = colorHex(input.color_letra);
     const maxOrden = await this.db.query<{ n: number }>(
-      `SELECT coalesce(max(orden), 0)::int AS n FROM seguridad_vial.catalogo_licencia`,
+      `SELECT coalesce(max(orden), 0)::int AS n
+       FROM seguridad_vial.catalogo_licencia WHERE ambito = $1`,
+      [ambito],
     );
     try {
       const result = await this.db.query(
         `INSERT INTO seguridad_vial.catalogo_licencia
-           (codigo, nombre, orden, color_fondo, color_letra)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, codigo, nombre, activo, orden, color_fondo, color_letra`,
-        [codigo, nombre, (maxOrden.rows[0]?.n ?? 0) + 10, colorFondo, colorLetra],
+           (codigo, codigo_sap, nombre, horario, ambito, tipo, orden, color_fondo, color_letra)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING id, codigo, codigo_sap, nombre, horario, ambito, tipo,
+                   activo, orden, color_fondo, color_letra`,
+        [
+          codigo,
+          input.codigo_sap?.trim() || null,
+          nombre,
+          input.horario?.trim() || nombre,
+          ambito,
+          tipo,
+          (maxOrden.rows[0]?.n ?? 0) + 10,
+          colorFondo,
+          colorLetra,
+        ],
       );
       return result.rows[0];
     } catch (e) {
       if (isPgError(e) && e.code === '23505') {
-        throw new ConflictException('Ya existe una licencia con ese código');
+        throw new ConflictException('Ya existe ese código en el ámbito');
       }
       throw e;
     }
@@ -599,6 +993,10 @@ export class AdministrationService {
     input: {
       nombre?: string;
       codigo?: string;
+      codigo_sap?: string | null;
+      horario?: string | null;
+      ambito?: string;
+      tipo?: string;
       activo?: boolean;
       orden?: number;
       color_fondo?: string | null;
@@ -610,10 +1008,11 @@ export class AdministrationService {
       [id],
     );
     if (!current.rows[0]) {
-      throw new NotFoundException('Licencia no encontrada');
+      throw new NotFoundException('Código no encontrado');
     }
     const touchFondo = Object.prototype.hasOwnProperty.call(input, 'color_fondo');
     const touchLetra = Object.prototype.hasOwnProperty.call(input, 'color_letra');
+    const touchSap = Object.prototype.hasOwnProperty.call(input, 'codigo_sap');
     const result = await this.db.query(
       `UPDATE seguridad_vial.catalogo_licencia
        SET nombre = coalesce($2, nombre),
@@ -621,9 +1020,14 @@ export class AdministrationService {
            activo = coalesce($4, activo),
            orden = coalesce($5, orden),
            color_fondo = CASE WHEN $6::boolean THEN $7 ELSE color_fondo END,
-           color_letra = CASE WHEN $8::boolean THEN $9 ELSE color_letra END
+           color_letra = CASE WHEN $8::boolean THEN $9 ELSE color_letra END,
+           codigo_sap = CASE WHEN $10::boolean THEN $11 ELSE codigo_sap END,
+           horario = coalesce($12, horario),
+           ambito = coalesce($13, ambito),
+           tipo = coalesce($14, tipo)
        WHERE id = $1
-       RETURNING id, codigo, nombre, activo, orden, color_fondo, color_letra`,
+       RETURNING id, codigo, codigo_sap, nombre, horario, ambito, tipo,
+                 activo, orden, color_fondo, color_letra`,
       [
         id,
         input.nombre?.trim() || null,
@@ -634,6 +1038,15 @@ export class AdministrationService {
         touchFondo ? colorHex(input.color_fondo) : null,
         touchLetra,
         touchLetra ? colorHex(input.color_letra) : null,
+        touchSap,
+        touchSap ? input.codigo_sap?.trim() || null : null,
+        input.horario?.trim() || null,
+        input.ambito === 'BASE_OPERACIONES' || input.ambito === 'SEGURIDAD_VIAL'
+          ? input.ambito
+          : null,
+        ['TURNO', 'AUSENCIA', 'FRANCO', 'OTRO'].includes(input.tipo ?? '')
+          ? input.tipo
+          : null,
       ],
     );
     return result.rows[0];
@@ -644,7 +1057,7 @@ export class AdministrationService {
       `SELECT id FROM seguridad_vial.catalogo_licencia WHERE id = $1`,
       [id],
     );
-    if (!current.rows[0]) throw new NotFoundException('Licencia no encontrada');
+    if (!current.rows[0]) throw new NotFoundException('Código no encontrado');
     const used = await this.db.query(
       `SELECT 1 FROM seguridad_vial.asignacion_operativa
        WHERE catalogo_licencia_id = $1 LIMIT 1`,
@@ -652,11 +1065,108 @@ export class AdministrationService {
     );
     if (used.rows[0]) {
       throw new ConflictException(
-        'Esa licencia ya se usó en la real. Desactivala en lugar de eliminarla.',
+        'Ese código ya se usó en la real. Desactivalo en lugar de eliminarlo.',
       );
     }
     await this.db.query(
       `DELETE FROM seguridad_vial.catalogo_licencia WHERE id = $1`,
+      [id],
+    );
+    return { ok: true };
+  }
+
+  async listTimerMotivos() {
+    const result = await this.db.query(
+      `SELECT id, nombre, activo, orden
+       FROM seguridad_vial.catalogo_timer_motivo
+       ORDER BY orden, nombre`,
+    );
+    return result.rows;
+  }
+
+  async createTimerMotivo(input: { nombre: string; orden?: number }) {
+    const nombre = input.nombre.trim();
+    if (nombre.length < 3) {
+      throw new BadRequestException('El motivo tiene que tener al menos 3 letras');
+    }
+    const maxOrden = await this.db.query<{ n: number }>(
+      `SELECT coalesce(max(orden), 0)::int AS n FROM seguridad_vial.catalogo_timer_motivo`,
+    );
+    try {
+      const result = await this.db.query(
+        `INSERT INTO seguridad_vial.catalogo_timer_motivo (nombre, orden)
+         VALUES ($1, $2)
+         RETURNING id, nombre, activo, orden`,
+        [nombre, input.orden ?? (maxOrden.rows[0]?.n ?? 0) + 10],
+      );
+      return result.rows[0];
+    } catch (e) {
+      if (isPgError(e) && e.code === '23505') {
+        throw new ConflictException('Ya existe ese motivo');
+      }
+      throw e;
+    }
+  }
+
+  async updateTimerMotivo(
+    id: string,
+    input: { nombre?: string; activo?: boolean; orden?: number },
+  ) {
+    const current = await this.db.query(
+      `SELECT id FROM seguridad_vial.catalogo_timer_motivo WHERE id = $1`,
+      [id],
+    );
+    if (!current.rows[0]) throw new NotFoundException('Motivo no encontrado');
+    const nombre = input.nombre?.trim();
+    if (nombre !== undefined && nombre.length < 3) {
+      throw new BadRequestException('El motivo tiene que tener al menos 3 letras');
+    }
+    try {
+      const result = await this.db.query(
+        `UPDATE seguridad_vial.catalogo_timer_motivo
+         SET nombre = coalesce($2, nombre),
+             activo = coalesce($3, activo),
+             orden = coalesce($4, orden)
+         WHERE id = $1
+         RETURNING id, nombre, activo, orden`,
+        [id, nombre || null, input.activo ?? null, input.orden ?? null],
+      );
+      return result.rows[0];
+    } catch (e) {
+      if (isPgError(e) && e.code === '23505') {
+        throw new ConflictException('Ya existe ese motivo');
+      }
+      throw e;
+    }
+  }
+
+  async deleteTimerMotivo(id: string) {
+    const current = await this.db.query<{ nombre: string }>(
+      `SELECT nombre FROM seguridad_vial.catalogo_timer_motivo WHERE id = $1`,
+      [id],
+    );
+    const row = current.rows[0];
+    if (!row) throw new NotFoundException('Motivo no encontrado');
+    const used = await this.db.query(
+      `SELECT 1 FROM seguridad_vial.timer_extra WHERE btrim(motivo) = btrim($1) LIMIT 1`,
+      [row.nombre],
+    );
+    if (used.rows[0]) {
+      throw new ConflictException(
+        'Ese motivo ya se usó en el Timer. Desactivalo en lugar de eliminarlo.',
+      );
+    }
+    const usedGuardado = await this.db.query(
+      `SELECT 1 FROM seguridad_vial.timer_guardado_fila WHERE btrim(motivo) = btrim($1) LIMIT 1`,
+      [row.nombre],
+    );
+    if (usedGuardado.rows[0]) {
+      throw new ConflictException(
+        'Ese motivo ya está en un Timer guardado. Desactivalo en lugar de eliminarlo.',
+      );
+    }
+    await this.db.query(
+      `DELETE FROM seguridad_vial.catalogo_timer_motivo WHERE id = $1`,
       [id],
     );
     return { ok: true };

@@ -225,6 +225,10 @@ export class ScheduleEngineService {
     // horario de entrada, conservando el turno y sin tocar la cuadratura base.
     const { days: resolvedDays, desdobles } = resolverSuperposiciones(allDays, {
       cualquierMovilDelTurno: true,
+      // Ideal: móvil 4 y, si la franja propia está llena, cruzar franja
+      // (cambia hora solo ese día) para poder materializar el ciclo.
+      permitirMovil4: true,
+      permitirCruzarFranja: true,
     });
     allDays.length = 0;
     allDays.push(...resolvedDays);
@@ -548,8 +552,14 @@ export class ScheduleEngineService {
   /**
    * Crea (o regenera borrador) capa REAL derivada de la PLANIFICADA vigente,
    * copiando días del plan y aplicando asignacion_operativa (dupla Haro–Ramos, etc.).
+   * `resetInspectorIds`: copiar Ideal sobre Real en el rango (null = todos).
    */
-  async applyReal(dateFrom: string, dateTo: string, userId: string) {
+  async applyReal(
+    dateFrom: string,
+    dateTo: string,
+    userId: string,
+    opts?: { resetInspectorIds?: string[] | null },
+  ) {
     this.assertRange(dateFrom, dateTo);
 
     const plan = await this.db.query<{
@@ -607,6 +617,9 @@ export class ScheduleEngineService {
         let numero: number;
         let reused = false;
         let wipe = false;
+        const resetIds = opts?.resetInspectorIds;
+        const resetFromPlan = resetIds !== undefined;
+        const resetTargeted = Array.isArray(resetIds) && resetIds.length > 0;
 
         const existing = await client.query<{ id: string }>(
           `SELECT id FROM seguridad_vial.cronograma WHERE codigo = $1`,
@@ -654,7 +667,7 @@ export class ScheduleEngineService {
                 [versionId],
               );
             }
-            if (wipe) {
+            if (wipe && !resetTargeted) {
               await client.query(
                 `DELETE FROM seguridad_vial.cobertura_dia WHERE version_id = $1`,
                 [versionId],
@@ -746,6 +759,40 @@ export class ScheduleEngineService {
           [versionId, planVersionId, dateFrom, dateTo],
         );
 
+        let cellsReset = 0;
+        if (resetFromPlan) {
+          const reset = await client.query<{ id: string }>(
+            `UPDATE seguridad_vial.dia_cronograma r
+             SET tipo_dia = p.tipo_dia,
+                 turno = p.turno,
+                 movil_id = p.movil_id,
+                 codigo = p.codigo,
+                 inspector_asignado_id = p.inspector_asignado_id
+             FROM seguridad_vial.dia_cronograma p
+             WHERE r.version_id = $1
+               AND p.version_id = $2
+               AND r.posicion_id = p.posicion_id
+               AND r.fecha_operativa = p.fecha_operativa
+               AND r.fecha_operativa >= $3::date
+               AND r.fecha_operativa <= $4::date
+               AND (
+                 $5::uuid[] IS NULL
+                 OR r.inspector_titular_id = ANY($5)
+                 OR r.inspector_asignado_id = ANY($5)
+               )
+               AND (
+                 r.codigo IS DISTINCT FROM p.codigo
+                 OR r.tipo_dia IS DISTINCT FROM p.tipo_dia
+                 OR r.turno IS DISTINCT FROM p.turno
+                 OR r.movil_id IS DISTINCT FROM p.movil_id
+                 OR r.inspector_asignado_id IS DISTINCT FROM p.inspector_asignado_id
+               )
+             RETURNING r.id`,
+            [versionId, planVersionId, dateFrom, dateTo, resetIds],
+          );
+          cellsReset = reset.rowCount ?? 0;
+        }
+
         const planDays = await client.query<{
           fecha_operativa: string;
           posicion_id: string;
@@ -786,9 +833,27 @@ export class ScheduleEngineService {
         }));
 
         const withOps = applyOperationalExceptions(projected, exceptions);
+        const { days: resolvedDays } = resolverSuperposiciones(withOps, {
+          cualquierMovilDelTurno: true,
+          permitirMovil4: true,
+          permitirCruzarFranja: true,
+        });
+        const origByKey = new Map(
+          projected.map((d) => [`${d.positionId}|${d.date.slice(0, 10)}`, d]),
+        );
         let overlaysApplied = 0;
-        for (const day of withOps) {
-          if (!day.operationalExceptionId) continue;
+        for (const day of resolvedDays) {
+          const orig = origByKey.get(`${day.positionId}|${day.date.slice(0, 10)}`);
+          const cambio =
+            Boolean(day.operationalExceptionId) ||
+            Boolean(
+              orig &&
+                (orig.mobile !== day.mobile ||
+                  orig.shift !== day.shift ||
+                  orig.dayType !== day.dayType ||
+                  orig.code !== day.code),
+            );
+          if (!cambio) continue;
           const movilId =
             day.mobile !== null ? (mobileByNumber.get(day.mobile) ?? null) : null;
           await client.query(
@@ -840,6 +905,7 @@ export class ScheduleEngineService {
           days_copied: planDays.rowCount ?? 0,
           overlays_applied: overlaysApplied,
           operational_exceptions: exceptions.length,
+          cells_reset: cellsReset,
         };
       },
       { userId, changeReason: 'Materialización REAL con overlays operativos' },
@@ -1161,7 +1227,7 @@ export class ScheduleEngineService {
     if (kind === 'LICENCIA') {
       if (!input.catalogoLicenciaId) {
         throw new BadRequestException(
-          'Elegí un tipo de licencia de Administración → Licencias',
+          'Elegí un código de Administración → Códigos',
         );
       }
       const lic = await this.db.query<{ id: string; nombre: string }>(
@@ -1174,6 +1240,19 @@ export class ScheduleEngineService {
       }
       catalogoLicenciaId = lic.rows[0].id;
       licenciaNombre = lic.rows[0].nombre;
+    } else {
+      const codigoCat =
+        kind === 'VACACION' ? 'V' : kind === 'ENFERMEDAD' ? 'EF' : kind === 'FERIADO' ? 'F' : null;
+      if (codigoCat) {
+        const cat = await this.db.query<{ id: string }>(
+          `SELECT id FROM seguridad_vial.catalogo_licencia
+           WHERE activo = true AND upper(codigo) = $1
+           ORDER BY CASE ambito WHEN 'SEGURIDAD_VIAL' THEN 0 ELSE 1 END, orden
+           LIMIT 1`,
+          [codigoCat],
+        );
+        catalogoLicenciaId = cat.rows[0]?.id ?? null;
+      }
     }
 
     const tipoDia =
@@ -1341,6 +1420,157 @@ export class ScheduleEngineService {
     };
   }
 
+  /**
+   * Saca overlays de Real en un rango y rematerializa: esos días vuelven a Ideal.
+   * Si no hay inspector, aplica a todo el personal.
+   */
+  async clearOperationalRange(input: {
+    inspectorId?: string | null;
+    dateFrom: string;
+    dateTo: string;
+    userId: string;
+    reason?: string;
+    rematerialize?: boolean;
+  }) {
+    const {
+      inspectorId = null,
+      dateFrom,
+      dateTo,
+      userId,
+      rematerialize = true,
+    } = input;
+    this.assertRange(dateFrom, dateTo);
+
+    if (inspectorId) {
+      const exists = await this.db.query(
+        `SELECT 1 FROM seguridad_vial.inspector
+         WHERE id = $1 AND estado = 'ACTIVO' AND tipo_plantel <> 'PEAJISTA'`,
+        [inspectorId],
+      );
+      if (!exists.rows[0]) {
+        throw new NotFoundException('Inspector no encontrado o inactivo');
+      }
+    }
+
+    const overlapping = await this.db.query<{
+      id: string;
+      inspector_id: string;
+      tipo: string;
+      fecha_desde: string;
+      fecha_hasta: string | null;
+      tipo_dia: string | null;
+      turno: string | null;
+      movil_id: string | null;
+      posicion_destino_id: string | null;
+      motivo: string;
+      catalogo_licencia_id: string | null;
+    }>(
+      `SELECT id, inspector_id, tipo,
+              fecha_desde::text, fecha_hasta::text,
+              tipo_dia::text, turno::text, movil_id, posicion_destino_id,
+              motivo, catalogo_licencia_id
+       FROM seguridad_vial.asignacion_operativa
+       WHERE estado = 'ACTIVA'
+         AND ($3::uuid IS NULL OR inspector_id = $3)
+         AND fecha_desde <= $2::date
+         AND COALESCE(fecha_hasta, DATE '9999-12-31') >= $1::date
+       ORDER BY fecha_desde`,
+      [dateFrom, dateTo, inspectorId],
+    );
+
+    const motivo =
+      (input.reason || '').trim() ||
+      `Volver a Ideal ${dateFrom}→${dateTo}`;
+
+    let recortes = 0;
+    for (const row of overlapping.rows) {
+      const desde = row.fecha_desde.slice(0, 10);
+      const hasta = row.fecha_hasta ? row.fecha_hasta.slice(0, 10) : null;
+      await this.db.query(
+        `UPDATE seguridad_vial.asignacion_operativa SET estado = 'ANULADA' WHERE id = $1`,
+        [row.id],
+      );
+      recortes += 1;
+      if (desde < dateFrom) {
+        await this.insertOverlaySlice(row, desde, isoShift(dateFrom, -1), userId, motivo);
+      }
+      if (hasta === null || hasta > dateTo) {
+        await this.insertOverlaySlice(
+          row,
+          isoShift(dateTo, 1),
+          hasta,
+          userId,
+          motivo,
+        );
+      }
+    }
+
+    let real: unknown = null;
+    if (rematerialize) {
+      real = await this.applyReal(dateFrom, dateTo, userId, {
+        resetInspectorIds: inspectorId ? [inspectorId] : null,
+      });
+    }
+
+    const restored =
+      real && typeof real === 'object' && 'cells_reset' in real
+        ? Number((real as { cells_reset?: number }).cells_reset ?? 0)
+        : 0;
+
+    return {
+      cleared: recortes,
+      restored,
+      date_from: dateFrom,
+      date_to: dateTo,
+      inspector_id: inspectorId,
+      plan_preserved: true,
+      real,
+    };
+  }
+
+  private async insertOverlaySlice(
+    row: {
+      inspector_id: string;
+      tipo: string;
+      tipo_dia: string | null;
+      turno: string | null;
+      movil_id: string | null;
+      posicion_destino_id: string | null;
+      motivo: string;
+      catalogo_licencia_id: string | null;
+    },
+    from: string,
+    to: string | null,
+    userId: string,
+    motivo: string,
+  ) {
+    if (to !== null && from > to) return;
+    await this.db.query(
+      `INSERT INTO seguridad_vial.asignacion_operativa(
+         inspector_id, tipo, fecha_desde, fecha_hasta,
+         tipo_dia, turno, movil_id, posicion_destino_id,
+         motivo, creada_por, catalogo_licencia_id
+       ) VALUES (
+         $1, $2, $3::date, $4::date,
+         $5::seguridad_vial.tipo_dia, $6::seguridad_vial.turno_codigo,
+         $7, $8, $9, $10, $11
+       )`,
+      [
+        row.inspector_id,
+        row.tipo,
+        from,
+        to,
+        row.tipo_dia,
+        row.turno,
+        row.movil_id,
+        row.posicion_destino_id,
+        `${row.motivo} · ${motivo}`,
+        userId,
+        row.catalogo_licencia_id,
+      ],
+    );
+  }
+
   private async latestPlanVersionId(dateFrom: string, dateTo: string) {
     const plan = await this.db.query<{ version_id: string }>(
       `SELECT v.id AS version_id
@@ -1391,6 +1621,8 @@ export class ScheduleEngineService {
       posicion_codigo: string;
       inspector_id: string | null;
       inspector_nombre: string | null;
+      asignado_desde: string | null;
+      asignado_hasta: string | null;
       fecha_referencia: string;
       posicion_ciclo: number;
       turno: string | null;
@@ -1421,18 +1653,28 @@ export class ScheduleEngineService {
        ),
        ocupante AS (
          SELECT DISTINCT ON (a.posicion_id)
-                a.posicion_id, a.inspector_id, i.nombre_completo
+                a.posicion_id, a.inspector_id, i.nombre_completo,
+                a.fecha_desde::text AS asignado_desde,
+                a.fecha_hasta::text AS asignado_hasta
          FROM seguridad_vial.asignacion_inspector_posicion a
          JOIN seguridad_vial.inspector i ON i.id = a.inspector_id
-         WHERE current_date <@ a.vigencia
-           AND i.estado = 'ACTIVO'
+         WHERE i.estado = 'ACTIVO'
            AND i.tipo_plantel <> 'PEAJISTA'
-         ORDER BY a.posicion_id, a.fecha_desde DESC
+           AND (a.fecha_hasta IS NULL OR a.fecha_hasta >= current_date)
+         ORDER BY a.posicion_id,
+                  CASE
+                    WHEN current_date <@ a.vigencia THEN 0
+                    WHEN a.fecha_desde > current_date THEN 1
+                    ELSE 2
+                  END,
+                  a.fecha_desde
        )
        SELECT p.id AS posicion_id,
               p.codigo AS posicion_codigo,
               o.inspector_id,
               o.nombre_completo AS inspector_nombre,
+              o.asignado_desde,
+              o.asignado_hasta,
               e.fecha_referencia::text AS fecha_referencia,
               e.posicion_ciclo,
               e.turno::text AS turno,
@@ -1521,6 +1763,8 @@ export class ScheduleEngineService {
           shifts: shiftList,
           mobiles: mobileList,
           completedBlocksOnMobile: completed,
+          assignedFrom: row.asignado_desde?.slice(0, 10) ?? null,
+          assignedTo: row.asignado_hasta?.slice(0, 10) ?? null,
         },
       ];
     });
@@ -1610,6 +1854,11 @@ function countCompletedSameMobileBlocks(
     }
   }
   return count;
+}
+
+function isoShift(iso: string, days: number): string {
+  const t = Date.parse(`${iso.slice(0, 10)}T12:00:00Z`);
+  return new Date(t + days * 86_400_000).toISOString().slice(0, 10);
 }
 
 function summarizeCodes(days: ProjectedDay[]) {

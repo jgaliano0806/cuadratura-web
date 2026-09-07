@@ -49,8 +49,90 @@ type Fila = {
   codigo: string | null;
   movil: number | null;
   posicion_codigo: string;
+  inspector_id: string | null;
   inspector: string | null;
+  seccion: string | null;
+  licencia_codigo: string | null;
 };
+
+export type ExportFiltros = {
+  from?: string;
+  to?: string;
+  inspectores: string[];
+  secciones: string[];
+  codigos: string[];
+  moviles: string[];
+  turnos: string[];
+};
+
+const FILTROS_VACIOS: ExportFiltros = {
+  inspectores: [],
+  secciones: [],
+  codigos: [],
+  moviles: [],
+  turnos: [],
+};
+
+const SECCION_XLS: Record<string, string> = {
+  MOVILES: 'Móviles (SV)',
+  EPI: 'E.P.I.',
+  BO: 'Base de Operaciones',
+};
+
+function etiquetaSeccionXls(id: string | null | undefined) {
+  if (!id) return SECCION_XLS.MOVILES;
+  return SECCION_XLS[id] ?? id.replace(/_/g, ' ');
+}
+
+function enRango(fecha: string, from?: string, to?: string): boolean {
+  if (from && fecha < from) return false;
+  if (to && fecha > to) return false;
+  return true;
+}
+
+/** Misma lógica que `diaPasa` / `cellShortLabel` de la grilla. */
+function cortoCelda(f: Fila): string {
+  const c = (f.codigo || '').trim();
+  if (c) return c;
+  if (f.tipo_dia === 'FRANCO') return 'F';
+  if (f.tipo_dia === 'VACACION') return 'V';
+  if (f.tipo_dia === 'ENFERMEDAD') return 'EF';
+  if (f.turno && f.movil != null) return `${f.turno}${f.movil}`;
+  return '';
+}
+
+function celdaPasa(f: Fila, filtros: ExportFiltros): boolean {
+  if (filtros.moviles.length && (f.movil == null || !filtros.moviles.includes(String(f.movil)))) {
+    return false;
+  }
+  if (filtros.turnos.length && (!f.turno || !filtros.turnos.includes(f.turno))) return false;
+  if (filtros.codigos.length) {
+    const codigos = new Set<string>();
+    if (f.licencia_codigo) codigos.add(f.licencia_codigo);
+    if (f.codigo) codigos.add(f.codigo);
+    const corto = cortoCelda(f);
+    if (corto) codigos.add(corto);
+    if (![...codigos].some((c) => filtros.codigos.includes(c))) return false;
+  }
+  return true;
+}
+
+function etiquetaFiltros(filtros: ExportFiltros): string {
+  const bits: string[] = [];
+  if (filtros.from || filtros.to) {
+    bits.push(`${filtros.from ?? '…'} al ${filtros.to ?? '…'}`);
+  }
+  if (filtros.codigos.length) bits.push(`códigos ${filtros.codigos.join(', ')}`);
+  if (filtros.moviles.length) bits.push(`móviles ${filtros.moviles.join(', ')}`);
+  if (filtros.turnos.length) bits.push(`turnos ${filtros.turnos.join(', ')}`);
+  if (filtros.inspectores.length) {
+    bits.push(`${filtros.inspectores.length} inspector${filtros.inspectores.length === 1 ? '' : 'es'}`);
+  }
+  if (filtros.secciones.length > 1) {
+    bits.push(`${filtros.secciones.length} secciones`);
+  }
+  return bits.length ? ` · ${bits.join(' · ')}` : '';
+}
 
 const BORDE: Partial<ExcelJS.Borders> = {
   top: { style: 'thin', color: { argb: 'FFBFBFBF' } },
@@ -68,6 +150,46 @@ function ddmm(iso: string): string {
   return `${d}/${m}`;
 }
 
+function hexArgb(hex?: string | null): string | null {
+  if (!hex) return null;
+  const t = hex.trim().replace('#', '');
+  if (!/^[0-9A-Fa-f]{6}$/.test(t)) return null;
+  return t.toUpperCase();
+}
+
+type CodigoCat = {
+  codigo: string;
+  codigo_sap: string | null;
+  nombre: string;
+  horario: string | null;
+  color_fondo: string | null;
+  color_letra: string | null;
+};
+
+function textoTimerCodigo(codigo: string, mapa: Map<string, CodigoCat>): string {
+  const c = codigo.trim();
+  if (!c) return '';
+  const row = mapa.get(c.toUpperCase());
+  if (!row) return c;
+  const desc = (row.horario || row.nombre || '').trim();
+  const sap = (row.codigo_sap || '').trim();
+  if (desc && sap) return `${c}  ${desc} / ${sap}`;
+  if (desc) return `${c}  ${desc}`;
+  return c;
+}
+
+function pintarCodigo(cell: ExcelJS.Cell, codigo: string, mapa: Map<string, CodigoCat>) {
+  const row = mapa.get(codigo.trim().toUpperCase());
+  const bg = hexArgb(row?.color_fondo);
+  const fg = hexArgb(row?.color_letra);
+  if (bg) cell.fill = relleno(bg);
+  cell.font = {
+    size: 10,
+    bold: true,
+    color: fg ? { argb: `FF${fg}` } : undefined,
+  };
+}
+
 @Injectable()
 export class ExportsService {
   constructor(private readonly db: DatabaseService) {}
@@ -82,6 +204,7 @@ export class ExportsService {
   async workbook(
     versionId: string,
     pack: 'cuadratura' | 'planillas' | 'todo' = 'todo',
+    filtros: ExportFiltros = FILTROS_VACIOS,
   ): Promise<{ buffer: Buffer; fileName: string }> {
     const meta = await this.db.query<{
       codigo: string;
@@ -107,12 +230,28 @@ export class ExportsService {
               d.codigo,
               m.numero AS movil,
               p.codigo AS posicion_codigo,
-              COALESCE(ia.nombre_completo, it.nombre_completo) AS inspector
+              COALESCE(ia.id, it.id)::text AS inspector_id,
+              COALESCE(ia.nombre_completo, it.nombre_completo) AS inspector,
+              COALESCE(ia.seccion, it.seccion) AS seccion,
+              lic.licencia_codigo
        FROM seguridad_vial.dia_cronograma d
        JOIN seguridad_vial.posicion_cuadratura p ON p.id = d.posicion_id
        LEFT JOIN seguridad_vial.movil m ON m.id = d.movil_id
        LEFT JOIN seguridad_vial.inspector it ON it.id = d.inspector_titular_id
        LEFT JOIN seguridad_vial.inspector ia ON ia.id = d.inspector_asignado_id
+       LEFT JOIN LATERAL (
+         SELECT cl.codigo AS licencia_codigo
+         FROM seguridad_vial.asignacion_operativa ao
+         JOIN seguridad_vial.catalogo_licencia cl ON cl.id = ao.catalogo_licencia_id
+         WHERE ao.estado = 'ACTIVA'
+           AND ao.tipo = 'LICENCIA'
+           AND ao.tipo_dia = 'LICENCIA'
+           AND ao.inspector_id = COALESCE(ia.id, it.id)
+           AND d.fecha_operativa >= ao.fecha_desde
+           AND (ao.fecha_hasta IS NULL OR d.fecha_operativa <= ao.fecha_hasta)
+         ORDER BY ao.creada_en DESC
+         LIMIT 1
+       ) lic ON true
        WHERE d.version_id = $1
          AND COALESCE(ia.id, it.id) IS NOT NULL
          AND COALESCE(ia.estado, it.estado) = 'ACTIVO'
@@ -121,13 +260,38 @@ export class ExportsService {
       [versionId],
     );
 
-    const filas = datos.rows;
-    const fechas = [...new Set(filas.map((f) => f.fecha_operativa))].sort();
-    const inspectores = [
-      ...new Set(filas.map((f) => f.inspector).filter((n): n is string => Boolean(n))),
-    ].sort((a, b) => a.localeCompare(b, 'es'));
+    const cruza = Boolean(
+      filtros.codigos.length || filtros.moviles.length || filtros.turnos.length,
+    );
+    const enPeriodo = datos.rows.filter((f) =>
+      enRango(f.fecha_operativa, filtros.from, filtros.to),
+    );
+    const delInspector = enPeriodo.filter(
+      (f) =>
+        !filtros.inspectores.length ||
+        (f.inspector_id != null && filtros.inspectores.includes(f.inspector_id)),
+    );
+    const delSeccion = delInspector.filter(
+      (f) =>
+        !filtros.secciones.length ||
+        (f.seccion != null && filtros.secciones.includes(f.seccion)),
+    );
+    const filas = delSeccion.filter((f) => !cruza || celdaPasa(f, filtros));
+    const fechas = [...new Set(enPeriodo.map((f) => f.fecha_operativa))].sort();
+    const personasMap = new Map<string, { nombre: string; seccion: string }>();
+    for (const f of filas) {
+      if (!f.inspector || personasMap.has(f.inspector)) continue;
+      personasMap.set(f.inspector, {
+        nombre: f.inspector,
+        seccion: etiquetaSeccionXls(f.seccion),
+      });
+    }
+    const personas = [...personasMap.values()].sort(
+      (a, b) =>
+        a.seccion.localeCompare(b.seccion, 'es') || a.nombre.localeCompare(b.nombre, 'es'),
+    );
+    const conSeccion = filtros.secciones.length > 1;
 
-    // índice inspector|fecha → código
     const porCelda = new Map<string, Fila>();
     for (const f of filas) {
       porCelda.set(`${f.inspector}|${f.fecha_operativa}`, f);
@@ -138,7 +302,15 @@ export class ExportsService {
     wb.created = new Date();
 
     if (pack !== 'planillas') {
-      this.hojaCuadratura(wb, info, fechas, inspectores, porCelda);
+      this.hojaCuadratura(
+        wb,
+        info,
+        fechas,
+        personas,
+        porCelda,
+        etiquetaFiltros(filtros),
+        conSeccion,
+      );
     }
     if (pack !== 'cuadratura') {
       for (const [clave, nombre] of TURNOS) {
@@ -163,28 +335,36 @@ export class ExportsService {
     wb: ExcelJS.Workbook,
     info: { capa: string; periodo_desde: string; periodo_hasta: string },
     fechas: string[],
-    inspectores: string[],
+    personas: Array<{ nombre: string; seccion: string }>,
     porCelda: Map<string, Fila>,
+    extraA2 = '',
+    conSeccion = false,
   ) {
+    const dia0 = conSeccion ? 3 : 2;
     const ws = wb.addWorksheet('Cuadratura', {
-      views: [{ state: 'frozen', xSplit: 1, ySplit: 5 }],
+      views: [{ state: 'frozen', xSplit: conSeccion ? 2 : 1, ySplit: 5 }],
     });
 
     ws.getCell('A1').value = 'Seguridad Vial y Tránsito — Cuadratura';
     ws.getCell('A1').font = { bold: true, size: 14, color: { argb: `FF${COLOR.HDR}` } };
     ws.getCell('A2').value =
       `Capa ${info.capa} · ${info.periodo_desde} al ${info.periodo_hasta} · ` +
-      `${inspectores.length} inspectores`;
+      `${personas.length} inspectores${extraA2}`;
     ws.getCell('A2').font = { italic: true, size: 10 };
 
     ws.getColumn(1).width = 22;
+    if (conSeccion) ws.getColumn(2).width = 16;
 
-    // fila 4: meses agrupados
-    let inicioMes = 2;
+    if (!fechas.length) {
+      ws.getCell('A3').value = 'Nadie coincide con el período o los filtros.';
+      return;
+    }
+
+    let inicioMes = dia0;
     let mesActual = '';
     fechas.forEach((f, i) => {
       const etiqueta = `${MESES[Number(f.slice(5, 7))]} ${f.slice(0, 4)}`;
-      const col = 2 + i;
+      const col = dia0 + i;
       if (mesActual && etiqueta !== mesActual) {
         if (col - 1 > inicioMes) ws.mergeCells(4, inicioMes, 4, col - 1);
         const c = ws.getCell(4, inicioMes);
@@ -196,36 +376,43 @@ export class ExportsService {
       if (etiqueta !== mesActual) ws.getCell(4, inicioMes).value = etiqueta;
       mesActual = etiqueta;
     });
-    if (1 + fechas.length > inicioMes) ws.mergeCells(4, inicioMes, 4, 1 + fechas.length);
+    const ultimaFechaCol = dia0 - 1 + fechas.length;
+    if (ultimaFechaCol > inicioMes) ws.mergeCells(4, inicioMes, 4, ultimaFechaCol);
     const ultimoMes = ws.getCell(4, inicioMes);
     ultimoMes.font = { bold: true, size: 9, color: { argb: 'FFFFFFFF' } };
     ultimoMes.fill = relleno('13131F');
     ultimoMes.alignment = { horizontal: 'center' };
 
-    // fila 5: fechas
-    const enc = ws.getCell(5, 1);
-    enc.value = 'INSPECTOR';
-    enc.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-    enc.fill = relleno(COLOR.HDR);
+    const pintarEnc = (col: number, texto: string) => {
+      const c = ws.getCell(5, col);
+      c.value = texto;
+      c.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      c.fill = relleno(COLOR.HDR);
+    };
+    pintarEnc(1, 'INSPECTOR');
+    if (conSeccion) pintarEnc(2, 'SECCIÓN');
     fechas.forEach((f, i) => {
-      const c = ws.getCell(5, 2 + i);
+      const c = ws.getCell(5, dia0 + i);
       c.value = ddmm(f);
       c.font = { bold: true, size: 7, color: { argb: 'FFFFFFFF' } };
       c.fill = relleno(COLOR.HDR);
       c.alignment = { horizontal: 'center' };
       c.border = BORDE;
-      ws.getColumn(2 + i).width = 5.5;
+      ws.getColumn(dia0 + i).width = 5.5;
     });
 
-    // filas de inspectores
-    inspectores.forEach((nombre, r) => {
+    personas.forEach((persona, r) => {
       const fila = 6 + r;
-      ws.getCell(fila, 1).value = nombre;
+      ws.getCell(fila, 1).value = persona.nombre;
       ws.getCell(fila, 1).font = { size: 9 };
+      if (conSeccion) {
+        ws.getCell(fila, 2).value = persona.seccion;
+        ws.getCell(fila, 2).font = { size: 9 };
+      }
       fechas.forEach((f, i) => {
-        const dato = porCelda.get(`${nombre}|${f}`);
+        const dato = porCelda.get(`${persona.nombre}|${f}`);
         const codigo = dato?.codigo ?? '';
-        const c = ws.getCell(fila, 2 + i);
+        const c = ws.getCell(fila, dia0 + i);
         c.value = codigo;
         c.alignment = { horizontal: 'center' };
         c.border = BORDE;
@@ -403,5 +590,141 @@ export class ExportsService {
       c.font = { size: 8, bold: true };
       c.border = BORDE;
     });
+  }
+
+  async timer(
+    from: string,
+    to: string,
+    filas: Array<{
+      fecha: string;
+      legajo: string;
+      persona: string;
+      origen: string;
+      ideal: string;
+      real: string;
+      motivo: string;
+      observacion: string;
+    }>,
+  ): Promise<{ buffer: Buffer; fileName: string }> {
+    const catalogo = await this.db.query<CodigoCat>(
+      `SELECT DISTINCT ON (upper(btrim(codigo)))
+              codigo, codigo_sap, nombre, horario, color_fondo, color_letra
+       FROM seguridad_vial.catalogo_licencia
+       WHERE activo = true
+       ORDER BY upper(btrim(codigo)),
+                CASE WHEN ambito = 'SEGURIDAD_VIAL' THEN 0 ELSE 1 END,
+                orden`,
+    );
+    const mapa = new Map<string, CodigoCat>();
+    for (const r of catalogo.rows) {
+      const key = (r.codigo || '').trim().toUpperCase();
+      if (key) mapa.set(key, r);
+    }
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'Cuadratura - Seguridad Vial';
+    wb.created = new Date();
+    const ws = wb.addWorksheet('Timer', {
+      views: [{ state: 'frozen', ySplit: 1 }],
+    });
+    const headers = [
+      'Fecha',
+      'Legajo',
+      'Persona',
+      'Origen',
+      'Ideal',
+      'Real',
+      'Motivo',
+      'Observación',
+    ];
+    ws.columns = [
+      { width: 12 },
+      { width: 12 },
+      { width: 28 },
+      { width: 14 },
+      { width: 36 },
+      { width: 36 },
+      { width: 32 },
+      { width: 36 },
+    ];
+    const head = ws.addRow(headers);
+    head.font = { bold: true, size: 10 };
+    head.eachCell((c) => {
+      c.fill = relleno('1F5A2A');
+      c.font = { bold: true, size: 10, color: { argb: 'FFFFFFFF' } };
+      c.border = BORDE;
+    });
+    const ordenadas = [...filas].sort((a, b) => {
+      const f = a.fecha.localeCompare(b.fecha);
+      if (f) return f;
+      return a.persona.localeCompare(b.persona, 'es');
+    });
+    for (const f of ordenadas) {
+      const agregada = f.origen === 'extra';
+      const row = ws.addRow([
+        ddmm(f.fecha.length >= 10 ? f.fecha.slice(0, 10) : f.fecha),
+        f.legajo || '',
+        f.persona || '',
+        agregada ? 'Agregada' : 'Cambio',
+        textoTimerCodigo(f.ideal, mapa),
+        textoTimerCodigo(f.real, mapa),
+        f.motivo || '',
+        f.observacion || '',
+      ]);
+      row.height = 28;
+      row.eachCell((c) => {
+        c.border = BORDE;
+        c.font = { size: 10 };
+        c.alignment = { vertical: 'middle', wrapText: true };
+      });
+      row.getCell(2).numFmt = '@';
+      pintarCodigo(row.getCell(5), f.ideal, mapa);
+      pintarCodigo(row.getCell(6), f.real, mapa);
+      if (agregada) {
+        row.getCell(4).fill = relleno('D9EAD3');
+      }
+    }
+    const buffer = Buffer.from(await wb.xlsx.writeBuffer());
+    const periodo = `${from.slice(0, 10).replace(/-/g, '')}_${to.slice(0, 10).replace(/-/g, '')}`;
+    return { buffer, fileName: `Timer_REAL_${periodo}.xlsx` };
+  }
+
+  async tabla(input: {
+    fileName: string;
+    sheets: Array<{
+      name: string;
+      headers: string[];
+      rows: Array<Array<string | number | null>>;
+    }>;
+  }): Promise<{ buffer: Buffer; fileName: string }> {
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'Cuadratura - Seguridad Vial';
+    wb.created = new Date();
+    for (const hoja of input.sheets.slice(0, 4)) {
+      const ws = wb.addWorksheet((hoja.name || 'Hoja').slice(0, 31), {
+        views: [{ state: 'frozen', ySplit: 1 }],
+      });
+      const headers = hoja.headers.slice(0, 40);
+      ws.columns = headers.map((h) => ({
+        width: Math.min(42, Math.max(12, String(h).length + 4)),
+      }));
+      const head = ws.addRow(headers);
+      head.eachCell((c) => {
+        c.fill = relleno('1F5A2A');
+        c.font = { bold: true, size: 10, color: { argb: 'FFFFFFFF' } };
+        c.border = BORDE;
+      });
+      for (const fila of hoja.rows.slice(0, 5000)) {
+        const row = ws.addRow(fila.slice(0, headers.length));
+        row.eachCell((c) => {
+          c.border = BORDE;
+          c.font = { size: 10 };
+          c.alignment = { vertical: 'middle', wrapText: true };
+        });
+      }
+    }
+    const buffer = Buffer.from(await wb.xlsx.writeBuffer());
+    const bruto = (input.fileName || 'Export').replace(/[^\w.\-áéíóúñÁÉÍÓÚÑ ]+/gi, '_');
+    const fileName = bruto.toLowerCase().endsWith('.xlsx') ? bruto : `${bruto}.xlsx`;
+    return { buffer, fileName };
   }
 }

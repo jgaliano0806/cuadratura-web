@@ -5,7 +5,11 @@ import { Modal } from '../ui/Modal';
 export type Licencia = {
   id: string;
   codigo: string;
+  codigo_sap?: string | null;
   nombre: string;
+  horario?: string | null;
+  ambito?: string;
+  tipo?: string;
   activo: boolean;
   orden: number;
   color_fondo?: string | null;
@@ -80,8 +84,8 @@ export function LicenciasModal({ open, onClose, onChanged }: Props) {
     <Modal
       open={open}
       onClose={onClose}
-      title="Tipos de licencia"
-      description="Estos tipos se ofrecen al registrar una licencia en Real. Podés dar de alta o desactivar."
+      title="Códigos"
+      description="Catálogo de cuadratura. El alta y la edición viven en Administración → Códigos."
       size="md"
     >
       {error ? <p className="field-error">{error}</p> : null}

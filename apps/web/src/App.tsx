@@ -1,11 +1,11 @@
 import { BrowserRouter, Navigate, Route, Routes, useSearchParams } from 'react-router-dom';
 import { AuthProvider } from './lib/auth';
 import { ThemeProvider } from './lib/theme';
+import { BoxThemeProvider } from './lib/boxTheme';
 import { AppLayout } from './components/AppLayout';
 import { ToastProvider } from './components/ui';
 import { LoginPage } from './pages/LoginPage';
 import { GapsPage } from './pages/GapsPage';
-import { OcupacionPage } from './pages/OcupacionPage';
 import { VacationsPage } from './pages/VacationsPage';
 import { ApprovalPage } from './pages/ApprovalPage';
 import { Mobile4Page } from './pages/Mobile4Page';
@@ -23,6 +23,7 @@ function RedirectToInspectores({ vista }: { vista: 'ideal' | 'real' }) {
 export function App() {
   return (
     <ThemeProvider>
+      <BoxThemeProvider>
       <ToastProvider>
         <AuthProvider>
           <BrowserRouter>
@@ -39,7 +40,7 @@ export function App() {
                 <Route path="/calendario" element={<Navigate to="/inspectores" replace />} />
                 <Route path="/proyeccion" element={<Navigate to="/inspectores" replace />} />
                 <Route path="/huecos" element={<GapsPage />} />
-                <Route path="/ocupacion" element={<OcupacionPage />} />
+                <Route path="/ocupacion" element={<RedirectToInspectores vista="ideal" />} />
                 <Route path="/vacaciones" element={<VacationsPage />} />
                 <Route path="/aprobacion" element={<ApprovalPage />} />
                 <Route path="/movil4" element={<Mobile4Page />} />
@@ -51,6 +52,7 @@ export function App() {
           </BrowserRouter>
         </AuthProvider>
       </ToastProvider>
+      </BoxThemeProvider>
     </ThemeProvider>
   );
 }

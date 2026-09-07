@@ -7,4 +7,7 @@ export { SwapInspectorsModal } from './SwapInspectorsModal';
 export { LicenciasModal } from './LicenciasModal';
 export type { Licencia } from './LicenciasModal';
 export { PeajistaModal } from './PeajistaModal';
+export { OcupacionBoard, OcupacionPackProvider } from './OcupacionBoard';
+export { TimerBoard } from './TimerBoard';
+export type { TimerFila } from './TimerBoard';
 export type { ScheduleTab, ScheduleMode } from './ScheduleObjectBar';

@@ -8,6 +8,7 @@ export type Person = {
   apellido?: string | null;
   legajo?: string | null;
   tipo_plantel?: string | null;
+  seccion?: string | null;
 };
 
 type Props = {
@@ -17,6 +18,9 @@ type Props = {
   onChange: (id: string) => void;
   allowAll?: boolean;
   allLabel?: string;
+  /** Permite dejar el campo vacío (X y opción «Sin elegir»). */
+  allowClear?: boolean;
+  clearLabel?: string;
   placeholder?: string;
   disabled?: boolean;
 };
@@ -46,6 +50,8 @@ export function PeoplePicker({
   onChange,
   allowAll = false,
   allLabel = 'Todos',
+  allowClear = false,
+  clearLabel = 'Sin elegir',
   placeholder = 'Buscar legajo, apellido o nombre…',
   disabled,
 }: Props) {
@@ -64,15 +70,25 @@ export function PeoplePicker({
       : allowAll && !value
         ? allLabel
         : '';
+  const sePuedeVaciar = allowClear && Boolean(value);
 
   const opciones = useMemo(() => {
     const filtradas = people.filter((p) => coincide(p, query));
-    if (!allowAll) return filtradas;
-    const todos = { id: '', nombre_completo: allLabel } as Person;
     const q = normalizar(query);
-    const todosVisible = !q || normalizar(allLabel).includes(q) || 'todos'.includes(q);
-    return todosVisible ? [todos, ...filtradas] : filtradas;
-  }, [people, query, allowAll, allLabel]);
+    const extra: Person[] = [];
+    if (allowAll) {
+      const visible = !q || normalizar(allLabel).includes(q) || 'todos'.includes(q);
+      if (visible) extra.push({ id: '', nombre_completo: allLabel } as Person);
+    } else if (allowClear) {
+      const visible =
+        !q ||
+        normalizar(clearLabel).includes(q) ||
+        'nadie'.includes(q) ||
+        'ninguno'.includes(q);
+      if (visible) extra.push({ id: '', nombre_completo: clearLabel } as Person);
+    }
+    return extra.length ? [...extra, ...filtradas] : filtradas;
+  }, [people, query, allowAll, allLabel, allowClear, clearLabel]);
 
   useEffect(() => {
     function onDoc(e: MouseEvent) {
@@ -112,6 +128,14 @@ export function PeoplePicker({
     } else if (e.key === 'Escape') {
       setAbierto(false);
       setQuery('');
+    } else if (
+      allowClear &&
+      value &&
+      !query &&
+      (e.key === 'Backspace' || e.key === 'Delete')
+    ) {
+      e.preventDefault();
+      elegir('');
     }
   }
 
@@ -120,7 +144,9 @@ export function PeoplePicker({
   return (
     <div
       ref={wrapRef}
-      className={`people-picker${valido ? ' is-valid' : ''}${abierto ? ' is-open' : ''}`}
+      className={`people-picker${valido ? ' is-valid' : ''}${abierto ? ' is-open' : ''}${
+        sePuedeVaciar ? ' has-clear' : ''
+      }`}
     >
       <input
         id={id}
@@ -137,7 +163,8 @@ export function PeoplePicker({
         onFocus={() => {
           setAbierto(true);
           setQuery('');
-          setHi(0);
+          const idx = opciones.findIndex((p) => p.id === value);
+          setHi(idx >= 0 ? idx : 0);
         }}
         onChange={(e) => {
           setQuery(e.target.value);
@@ -146,13 +173,25 @@ export function PeoplePicker({
         }}
         onKeyDown={onKey}
       />
+      {sePuedeVaciar ? (
+        <button
+          type="button"
+          className="people-picker-clear"
+          aria-label="Quitar"
+          tabIndex={-1}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => elegir('')}
+        >
+          ×
+        </button>
+      ) : null}
       {abierto && (
         <ul id={listId} ref={listRef} className="people-picker-list" role="listbox">
           {opciones.length === 0 ? (
             <li className="people-picker-empty">Nadie coincide con “{query.trim()}”.</li>
           ) : (
             opciones.map((p, i) => (
-              <li key={p.id || 'all'}>
+              <li key={p.id || (allowAll ? 'all' : 'clear')}>
                 <button
                   type="button"
                   role="option"
@@ -164,7 +203,7 @@ export function PeoplePicker({
                   onMouseEnter={() => setHi(i)}
                   onClick={() => elegir(p.id)}
                 >
-                  <span>{p.id ? etiquetaPersona(p) : allLabel}</span>
+                  <span>{p.id ? etiquetaPersona(p) : p.nombre_completo}</span>
                 </button>
               </li>
             ))

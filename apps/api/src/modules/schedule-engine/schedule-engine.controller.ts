@@ -59,6 +59,26 @@ class OcupacionDto {
   permitir_movil4?: boolean;
 }
 
+class ClearRangeDto {
+  @IsOptional()
+  @IsUUID()
+  inspector_id?: string;
+
+  @IsDateString()
+  date_from!: string;
+
+  @IsDateString()
+  date_to!: string;
+
+  @IsOptional()
+  @IsString()
+  reason?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  rematerialize?: boolean;
+}
+
 class WipeDto {
   @IsString()
   @MinLength(5)
@@ -272,6 +292,20 @@ export class ScheduleEngineController {
       userId: user.userId,
       reason: body.reason,
       catalogoLicenciaId: body.catalogo_licencia_id,
+      rematerialize: body.rematerialize ?? true,
+    });
+  }
+
+  /** Saca overlays de Real en un rango; esos días vuelven a Ideal. */
+  @Post('clear-range')
+  @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE)
+  clearRange(@Body() body: ClearRangeDto, @CurrentUser() user: RequestUser) {
+    return this.engine.clearOperationalRange({
+      inspectorId: body.inspector_id ?? null,
+      dateFrom: body.date_from,
+      dateTo: body.date_to,
+      userId: user.userId,
+      reason: body.reason,
       rematerialize: body.rematerialize ?? true,
     });
   }

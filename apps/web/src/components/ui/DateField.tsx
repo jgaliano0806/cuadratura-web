@@ -9,6 +9,7 @@ type Props = {
   onChange: (iso: string) => void;
   'aria-label'?: string;
   disabled?: boolean;
+  allowClear?: boolean;
 };
 
 export function DateField({
@@ -19,6 +20,7 @@ export function DateField({
   onChange,
   'aria-label': ariaLabel,
   disabled,
+  allowClear = false,
 }: Props) {
   const [text, setText] = useState(() => isoToDmy(value));
 
@@ -27,12 +29,18 @@ export function DateField({
   }, [value]);
 
   function commit(raw: string) {
+    if (allowClear && !raw.trim()) {
+      setText('');
+      if (value) onChange('');
+      return;
+    }
     const iso = parseDmy(raw);
     if (!iso) {
       setText(isoToDmy(value));
       return;
     }
-    onChange(iso);
+    if (iso !== value) onChange(iso);
+    else setText(isoToDmy(iso));
   }
 
   function onKey(e: KeyboardEvent<HTMLInputElement>) {
@@ -52,7 +60,13 @@ export function DateField({
         aria-label={ariaLabel}
         value={text}
         disabled={disabled}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          const raw = e.target.value;
+          setText(raw);
+          const iso = parseDmy(raw);
+          if (iso && iso !== value) onChange(iso);
+          else if (allowClear && !raw.trim() && value) onChange('');
+        }}
         onBlur={() => commit(text)}
         onKeyDown={onKey}
       />
@@ -65,7 +79,9 @@ export function DateField({
         max={max || undefined}
         disabled={disabled}
         onChange={(e) => {
-          if (e.target.value) onChange(e.target.value);
+          const v = e.target.value;
+          if (v) onChange(v);
+          else if (allowClear && value) onChange('');
         }}
       />
     </span>

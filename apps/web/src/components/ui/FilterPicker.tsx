@@ -12,9 +12,15 @@ type Props = {
   values: string[];
   onChange: (ids: string[]) => void;
   allLabel?: string;
+  /** Texto con el control cerrado y sin selección (si no, allLabel). */
+  summaryLabel?: string;
   placeholder?: string;
   className?: string;
   'aria-label'?: string;
+  /** pills = botones fijos (móviles, turnos). menu = buscador. */
+  variant?: 'menu' | 'pills';
+  /** Si es false, no aparece «Todos» y no se puede dejar vacío. */
+  allowEmpty?: boolean;
 };
 
 function normalizar(s: string) {
@@ -36,9 +42,12 @@ export function FilterPicker({
   values,
   onChange,
   allLabel = 'Todos',
+  summaryLabel,
   placeholder = 'Buscar…',
   className,
   'aria-label': ariaLabel,
+  variant = 'menu',
+  allowEmpty = true,
 }: Props) {
   const listId = useId();
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -48,16 +57,18 @@ export function FilterPicker({
   const [hi, setHi] = useState(0);
   const activos = new Set(values);
 
-  const opciones = useMemo(() => {
-    const filtradas = options.filter((o) => coincide(o, query));
-    const sel = filtradas.filter((o) => activos.has(o.id));
-    const resto = filtradas.filter((o) => !activos.has(o.id));
-    return [...sel, ...resto];
-  }, [options, query, values]);
+  const opciones = useMemo(
+    () => options.filter((o) => coincide(o, query)),
+    [options, query],
+  );
+  const elegidos = useMemo(() => {
+    const set = new Set(values);
+    return options.filter((o) => set.has(o.id));
+  }, [options, values]);
 
   const textoCerrado =
     values.length === 0
-      ? allLabel
+      ? (summaryLabel ?? allLabel)
       : values.length === 1
         ? (options.find((o) => o.id === values[0])?.label ?? '1 seleccionado')
         : `${values.length} seleccionados`;
@@ -81,17 +92,18 @@ export function FilterPicker({
 
   function toggle(idSel: string) {
     if (!idSel) {
-      onChange([]);
+      if (allowEmpty) onChange([]);
       return;
     }
-    if (activos.has(idSel)) onChange(values.filter((v) => v !== idSel));
-    else onChange([...values, idSel]);
+    if (activos.has(idSel)) {
+      const next = values.filter((v) => v !== idSel);
+      if (!allowEmpty && next.length === 0) return;
+      onChange(next);
+    } else onChange([...values, idSel]);
   }
 
-  const filas = [
-    { id: '', label: allLabel },
-    ...opciones,
-  ];
+  const filas = allowEmpty ? [{ id: '', label: allLabel }, ...opciones] : opciones;
+  const mostrarSync = abierto && elegidos.length > 0 && !query.trim();
 
   function onKey(e: KeyboardEvent<HTMLInputElement>) {
     if (e.key === 'ArrowDown') {
@@ -109,6 +121,42 @@ export function FilterPicker({
       setAbierto(false);
       setQuery('');
     }
+  }
+
+  if (variant === 'pills') {
+    return (
+      <div
+        id={id}
+        className={`filter-pills plantel-switch${values.length ? ' is-on' : ''}${
+          className ? ` ${className}` : ''
+        }`}
+        role="group"
+        aria-label={ariaLabel}
+      >
+        <button
+          type="button"
+          className={values.length === 0 ? 'active' : undefined}
+          aria-pressed={values.length === 0}
+          onClick={() => onChange([])}
+        >
+          {allLabel}
+        </button>
+        {options.map((o) => {
+          const sel = activos.has(o.id);
+          return (
+            <button
+              key={o.id}
+              type="button"
+              className={sel ? 'active' : undefined}
+              aria-pressed={sel}
+              onClick={() => toggle(o.id)}
+            >
+              {o.label}
+            </button>
+          );
+        })}
+      </div>
+    );
   }
 
   return (
@@ -143,32 +191,50 @@ export function FilterPicker({
         onKeyDown={onKey}
       />
       {abierto && (
-        <ul id={listId} ref={listRef} className="people-picker-list" role="listbox">
-          {opciones.length === 0 && query.trim() ? (
-            <li className="people-picker-empty">Nada coincide con “{query.trim()}”.</li>
-          ) : (
-            filas.map((o, i) => {
-              const sel = o.id ? activos.has(o.id) : values.length === 0;
-              return (
-                <li key={o.id || 'all'}>
-                  <button
-                    type="button"
-                    role="option"
-                    data-hi={i === hi ? '1' : '0'}
-                    aria-selected={sel}
-                    className={`people-picker-item${i === hi ? ' is-hi' : ''}${
-                      sel ? ' is-sel' : ''
-                    }${!o.id ? ' is-all' : ''}`}
-                    onMouseEnter={() => setHi(i)}
-                    onClick={() => toggle(o.id)}
-                  >
-                    <span>{o.label}</span>
-                  </button>
-                </li>
-              );
-            })
-          )}
-        </ul>
+        <div className="people-picker-list filter-picker-panel">
+          {mostrarSync ? (
+            <div className="filter-sync" aria-label="Seleccionados">
+              {elegidos.map((o) => (
+                <button
+                  key={o.id}
+                  type="button"
+                  className="chip chip-active"
+                  title="Quitar"
+                  onClick={() => toggle(o.id)}
+                >
+                  {o.label}
+                  <span aria-hidden>×</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+          <ul id={listId} ref={listRef} role="listbox">
+            {opciones.length === 0 && query.trim() ? (
+              <li className="people-picker-empty">Nada coincide con “{query.trim()}”.</li>
+            ) : (
+              filas.map((o, i) => {
+                const sel = o.id ? activos.has(o.id) : values.length === 0;
+                return (
+                  <li key={o.id || 'all'}>
+                    <button
+                      type="button"
+                      role="option"
+                      data-hi={i === hi ? '1' : '0'}
+                      aria-selected={sel}
+                      className={`people-picker-item${i === hi ? ' is-hi' : ''}${
+                        sel ? ' is-sel' : ''
+                      }${!o.id ? ' is-all' : ''}`}
+                      onMouseEnter={() => setHi(i)}
+                      onClick={() => toggle(o.id)}
+                    >
+                      <span>{o.label}</span>
+                    </button>
+                  </li>
+                );
+              })
+            )}
+          </ul>
+        </div>
       )}
     </div>
   );
