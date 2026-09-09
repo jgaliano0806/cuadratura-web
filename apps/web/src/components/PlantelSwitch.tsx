@@ -12,6 +12,8 @@ type Props = {
   planteles: PlantelId[];
   onAmbito: (id: AmbitoId) => void;
   onPlanteles: (ids: PlantelId[]) => void;
+  permitidos?: PlantelId[];
+  ambitos?: AmbitoId[];
   children?: ReactNode;
 };
 
@@ -20,14 +22,21 @@ export function PlantelSwitch({
   planteles,
   onAmbito,
   onPlanteles,
+  permitidos,
+  ambitos,
   children,
 }: Props) {
-  const cuadraturas = plantelesDe(ambito);
+  const zonas = ambitos?.length
+    ? AMBITOS.filter((a) => ambitos.includes(a.id))
+    : AMBITOS;
+  const cuadraturas = plantelesDe(ambito).filter(
+    (p) => !permitidos || permitidos.includes(p.id),
+  );
 
   return (
     <div className="cuad-head-nav">
       <div className="plantel-switch" role="tablist" aria-label="Ámbito">
-        {AMBITOS.map((a) => (
+        {zonas.map((a) => (
           <button
             key={a.id}
             type="button"
@@ -40,6 +49,7 @@ export function PlantelSwitch({
           </button>
         ))}
       </div>
+      {cuadraturas.length ? (
       <FilterPicker
         id="cuad-plantel"
         className="cuad-plantel-picker"
@@ -56,6 +66,7 @@ export function PlantelSwitch({
         values={planteles}
         onChange={(ids) => onPlanteles(ids as PlantelId[])}
       />
+      ) : null}
       {children}
     </div>
   );

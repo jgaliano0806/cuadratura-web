@@ -15,9 +15,9 @@ import {
   IsUUID,
   MinLength,
 } from 'class-validator';
-import { ROLE_CODES, VACATION_DURATIONS } from '@plataforma/shared';
+import { PERMISSION_CODES, ROLE_CODES, VACATION_DURATIONS } from '@plataforma/shared';
 import { CurrentUser, RequestUser } from '../identity/current-user.decorator';
-import { Roles, RolesGuard } from '../identity/roles.guard';
+import { Permissions, Roles, RolesGuard } from '../identity/roles.guard';
 import { VacationsService } from './vacations.service';
 
 class CreateVacationDto {
@@ -60,6 +60,7 @@ export class VacationsController {
 
   @Post()
   @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.JEFE)
+  @Permissions(PERMISSION_CODES.VACACIONES_GESTIONAR)
   create(@Body() body: CreateVacationDto, @CurrentUser() user: RequestUser) {
     return this.vacations.create(body, user.userId);
   }
@@ -74,6 +75,7 @@ export class VacationsController {
 
   @Post(':id/demand-work/assign')
   @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.JEFE)
+  @Permissions(PERMISSION_CODES.VACACIONES_GESTIONAR)
   assign(
     @Param('id') id: string,
     @Body() body: AssignDemandDto,

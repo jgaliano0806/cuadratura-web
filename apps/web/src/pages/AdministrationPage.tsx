@@ -24,6 +24,19 @@ import {
 } from '../lib/plantel';
 import { boxIdDeCodigo, colorValido, resolveCodeColors } from '../lib/scheduleUtils';
 import { useBoxTheme } from '../lib/boxTheme';
+import { useAuth } from '../lib/auth';
+import {
+  PERMISSION_CODES,
+  PERMISSION_GROUPS,
+  ROLE_CODES,
+  ROLE_META,
+  ROLE_TIPO_ORDEN,
+  defaultsDeTipo,
+  tipoPrincipal,
+  veSeccion,
+  type PermissionCode,
+  type RoleCode,
+} from '@plataforma/shared';
 
 type Tab =
   | 'inspectores'
@@ -33,6 +46,7 @@ type Tab =
   | 'posiciones'
   | 'perfiles'
   | 'usuarios'
+  | 'registro'
   | 'apariencia';
 
 type Column = { key: string; label: string; secondary?: string };
@@ -121,11 +135,74 @@ type LicenciaRow = {
   color_letra?: string | null;
 };
 
+type RegistroFila = {
+  id: string;
+  ocurrido_en: string;
+  usuario: string;
+  detalle: string;
+  entidad: string;
+  accion: string;
+};
+
 type MotivoRow = {
   id: string;
   nombre: string;
   activo: boolean;
   orden: number;
+};
+
+type RolCat = { codigo: string; nombre: string; descripcion?: string | null; permisos?: string[] };
+
+type UserRow = {
+  id: string;
+  legajo: string | null;
+  apellido: string | null;
+  nombres: string | null;
+  nombre_mostrar: string;
+  nombre_usuario: string;
+  email: string | null;
+  estado: string;
+  secciones_todas: boolean;
+  roles: string[];
+  roles_texto: string;
+  permisos: string[];
+  secciones: string[];
+};
+
+type UserForm = {
+  id?: string;
+  nombre_usuario: string;
+  nombre: string;
+  email: string;
+  legajo: string;
+  tipo: RoleCode;
+  permisos: string[];
+  secciones: string[];
+  secciones_todas: boolean;
+  estado: 'ACTIVO' | 'INACTIVO';
+};
+
+const USER_VACIO: UserForm = {
+  nombre_usuario: '',
+  nombre: '',
+  email: '',
+  legajo: '',
+  tipo: ROLE_CODES.CONSULTA,
+  permisos: defaultsDeTipo(ROLE_CODES.CONSULTA),
+  secciones: [],
+  secciones_todas: false,
+  estado: 'ACTIVO',
+};
+
+function defaultsRol(cat: RolCat[], codigo: string): string[] {
+  return cat.find((r) => r.codigo === codigo)?.permisos?.length
+    ? [...(cat.find((r) => r.codigo === codigo)?.permisos ?? [])]
+    : defaultsDeTipo(codigo);
+}
+
+type ClaveUnaVez = {
+  quien: string;
+  clave: string;
 };
 
 type MovilRow = {
@@ -243,6 +320,12 @@ const TURNOS_SEQ: Array<'M' | 'N' | 'T'> = ['M', 'N', 'T'];
 
 export function AdministrationPage() {
   const [params, setParams] = useSearchParams();
+  const { user, hasPermission } = useAuth();
+  const alcance = {
+    seccionesTodas: user?.seccionesTodas ?? true,
+    secciones: user?.secciones ?? [],
+  };
+  const seccionesUsuario = SECCIONES_SV_SORTED.filter((s) => veSeccion(alcance, s.id));
   const { patchBox } = useBoxTheme();
   const ambitoUi = parseAmbito(params.get('ambito'), params.get('plantel'));
   const plantel = parsePlantel(params.get('plantel'), ambitoUi);
@@ -254,6 +337,12 @@ export function AdministrationPage() {
   const [posiciones, setPosiciones] = useState<PosicionOpt[]>([]);
   const [licencias, setLicencias] = useState<LicenciaRow[]>([]);
   const [motivos, setMotivos] = useState<MotivoRow[]>([]);
+  const [usuarios, setUsuarios] = useState<UserRow[]>([]);
+  const [registro, setRegistro] = useState<RegistroFila[]>([]);
+  const [rolesCat, setRolesCat] = useState<RolCat[]>([]);
+  const [userForm, setUserForm] = useState<UserForm | null>(null);
+  const [claveUnaVez, setClaveUnaVez] = useState<ClaveUnaVez | null>(null);
+  const [userFiltro, setUserFiltro] = useState('');
   const [moviles, setMoviles] = useState<MovilRow[]>([]);
   const [bases, setBases] = useState<BaseRow[]>([]);
   const [error, setError] = useState('');
@@ -310,8 +399,7 @@ export function AdministrationPage() {
   }
 
   const seccionVista = seccionDePlantel(plantel);
-  // personasVista = todos los inspectores (sin filtrar por sección del switch)
-  const personasVista = inspectores;
+  const personasVista = inspectores.filter((i) => veSeccion(alcance, i.seccion));
   const personasFiltradas = useMemo(() => {
     const q = normalizarTexto(filtroTexto.trim());
     const est = new Set(filtroEstado);
@@ -405,6 +493,147 @@ export function AdministrationPage() {
     setBases(b);
   }
 
+  async function cargarUsuarios() {
+    const [lista, roles] = await Promise.all([
+      api<UserRow[]>('/admin/users'),
+      api<RolCat[]>('/admin/roles'),
+    ]);
+    setUsuarios(lista);
+    setRolesCat(roles);
+  }
+
+  async function cargarRegistro() {
+    setRegistro(await api<RegistroFila[]>('/audit?limit=200'));
+  }
+
+  function abrirUsuario(row?: UserRow) {
+    if (!row) {
+      setUserForm({ ...USER_VACIO });
+      return;
+    }
+    setUserForm({
+      id: row.id,
+      nombre_usuario: row.nombre_usuario,
+      nombre: apellidoYNombre(row) || row.nombre_mostrar,
+      email: row.email || '',
+      legajo: row.legajo || '',
+      tipo: tipoPrincipal(row.roles ?? []),
+      permisos: row.permisos?.length
+        ? row.permisos
+        : defaultsDeTipo(tipoPrincipal(row.roles ?? [])),
+      secciones: row.secciones ?? [],
+      secciones_todas: row.secciones_todas,
+      estado: row.estado === 'INACTIVO' ? 'INACTIVO' : 'ACTIVO',
+    });
+  }
+
+  async function guardarUsuario(e: FormEvent) {
+    e.preventDefault();
+    if (!userForm) return;
+    const partes = partirNombre(userForm.nombre);
+    if (!partes.apellido || !partes.nombres) {
+      setError('Escribí apellido y nombre.');
+      return;
+    }
+    if (!userForm.email.trim()) {
+      setError('El email es obligatorio: con eso se ingresa.');
+      return;
+    }
+    if (!userForm.permisos.length) {
+      setError('Asigná al menos un permiso.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const email = userForm.email.trim();
+      const body: Record<string, unknown> = {
+        nombre_usuario: userForm.nombre_usuario.trim() || email,
+        apellido: partes.apellido,
+        nombres: partes.nombres,
+        email,
+        legajo: userForm.legajo.trim() || null,
+        roles: [userForm.tipo],
+        permisos: userForm.permisos,
+        secciones: userForm.secciones_todas ? [] : userForm.secciones,
+        secciones_todas: userForm.secciones_todas,
+      };
+      if (userForm.id) body.estado = userForm.estado;
+      if (userForm.id) {
+        await api(`/admin/users/${userForm.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify(body),
+        });
+      } else {
+        const creado = await api<{ clave_inicial?: string }>('/admin/users', {
+          method: 'POST',
+          body: JSON.stringify(body),
+        });
+        if (creado.clave_inicial) {
+          setClaveUnaVez({
+            quien: userForm.nombre.trim() || email,
+            clave: creado.clave_inicial,
+          });
+        }
+      }
+      setUserForm(null);
+      await cargarUsuarios();
+    } catch (err) {
+      setError(mensaje(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggleUsuario(row: UserRow) {
+    setBusy(true);
+    setError('');
+    try {
+      await api(`/admin/users/${row.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          estado: row.estado === 'ACTIVO' ? 'INACTIVO' : 'ACTIVO',
+        }),
+      });
+      await cargarUsuarios();
+    } catch (err) {
+      setError(mensaje(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resetearClave(row: UserRow) {
+    const quien = apellidoYNombre(row) || row.nombre_mostrar || row.email || row.nombre_usuario;
+    if (!confirm(`¿Resetear la contraseña de ${quien}? La actual deja de servir.`)) return;
+    setBusy(true);
+    setError('');
+    try {
+      const r = await api<{ clave: string }>(`/admin/users/${row.id}/password`, {
+        method: 'PATCH',
+      });
+      setClaveUnaVez({ quien, clave: r.clave });
+    } catch (err) {
+      setError(mensaje(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function eliminarUsuario(row: UserRow) {
+    if (!confirm(`¿Borrar a ${row.email || row.nombre_usuario}? Si ya firmó un Timer, ponelo Inactivo en Modificar.`)) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api(`/admin/users/${row.id}`, { method: 'DELETE' });
+      await cargarUsuarios();
+    } catch (err) {
+      setError(mensaje(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   useEffect(() => {
     setBusy(true);
     setError('');
@@ -425,14 +654,21 @@ export function AdministrationPage() {
         await cargarMoviles();
         return;
       }
+      if (tab === 'usuarios') {
+        await cargarUsuarios();
+        return;
+      }
+      if (tab === 'registro') {
+        await cargarRegistro();
+        return;
+      }
       if (tab === 'apariencia') return;
       const path: Record<
-        Exclude<Tab, 'inspectores' | 'licencias' | 'motivos' | 'moviles' | 'apariencia'>,
+        Exclude<Tab, 'inspectores' | 'licencias' | 'motivos' | 'moviles' | 'usuarios' | 'registro' | 'apariencia'>,
         string
       > = {
         posiciones: '/admin/positions',
         perfiles: '/admin/profiles',
-        usuarios: '/admin/users',
       };
       setRows(await api<Record<string, unknown>[]>(path[tab]));
     };
@@ -453,20 +689,29 @@ export function AdministrationPage() {
     setFiltroSecuencia([]);
   }, [plantel]);
 
-  const tabs: Array<{ id: Tab; label: string }> = [
-    { id: 'inspectores', label: 'Personas' },
-    { id: 'licencias', label: 'Códigos' },
-    { id: 'motivos', label: 'Motivos' },
-    { id: 'moviles', label: 'Móviles' },
-    { id: 'usuarios', label: 'Usuarios' },
-    { id: 'apariencia', label: 'Apariencia' },
-  ];
+  const tabs: Array<{ id: Tab; label: string; perm?: PermissionCode }> = [
+    { id: 'inspectores', label: 'Personas', perm: PERMISSION_CODES.PERSONAS_GESTIONAR },
+    { id: 'licencias', label: 'Códigos', perm: PERMISSION_CODES.LICENCIAS_GESTIONAR },
+    { id: 'motivos', label: 'Motivos', perm: PERMISSION_CODES.MOTIVOS_GESTIONAR },
+    { id: 'moviles', label: 'Móviles', perm: PERMISSION_CODES.MOVILES_GESTIONAR },
+    { id: 'usuarios', label: 'Usuarios', perm: PERMISSION_CODES.USUARIOS_ADMINISTRAR },
+    { id: 'apariencia', label: 'Apariencia', perm: PERMISSION_CODES.APARIENCIA_GESTIONAR },
+    { id: 'registro', label: 'Actividad', perm: PERMISSION_CODES.AUDITORIA_CONSULTAR },
+  ].filter((t) => !t.perm || hasPermission(t.perm));
+
+  useEffect(() => {
+    if (tabs.length && !tabs.some((t) => t.id === tab)) {
+      setTab(tabs[0].id);
+    }
+  }, [tab, tabs]);
 
   const columns =
     tab === 'inspectores' ||
     tab === 'licencias' ||
     tab === 'motivos' ||
     tab === 'moviles' ||
+    tab === 'usuarios' ||
+    tab === 'registro' ||
     tab === 'apariencia'
       ? []
       : COLUMNS[tab];
@@ -997,7 +1242,7 @@ export function AdministrationPage() {
                 summaryLabel="Sección"
                 allLabel="Todas"
                 placeholder="Buscar sección…"
-                options={SECCIONES_SV_SORTED.map((s) => ({ id: s.id, label: s.label }))}
+                options={seccionesUsuario.map((s) => ({ id: s.id, label: s.label }))}
                 values={filtroSeccion}
                 onChange={setFiltroSeccion}
               />
@@ -1041,7 +1286,10 @@ export function AdministrationPage() {
                   setForm({
                     ...FORM_VACIO,
                     fecha_desde: hoyIso(),
-                    seccion: seccionVista ?? 'MOVILES',
+                    seccion:
+                      seccionesUsuario.some((s) => s.id === (seccionVista ?? ''))
+                        ? (seccionVista ?? 'MOVILES')
+                        : (seccionesUsuario[0]?.id ?? 'MOVILES'),
                   })
                 }
               >
@@ -1113,7 +1361,7 @@ export function AdministrationPage() {
                           className="btn ghost sm"
                           onClick={() => void abrirHistorial(row)}
                         >
-                          Apertura
+                          Historial
                         </button>
                         {row.estado === 'ACTIVO' ? (
                           <button
@@ -1491,6 +1739,116 @@ export function AdministrationPage() {
         </section>
       ) : null}
 
+      {tab === 'usuarios' ? (
+        <section className="panel">
+          <div className="admin-toolbar">
+            <div className="cuad-filters admin-filters">
+              <input
+                type="search"
+                className="admin-search"
+                placeholder="Legajo, nombre o usuario…"
+                aria-label="Buscar usuarios"
+                value={userFiltro}
+                onChange={(e) => setUserFiltro(e.target.value)}
+              />
+            </div>
+            <button
+              type="button"
+              className="btn primary sm"
+              onClick={() => abrirUsuario()}
+            >
+              Incorporar usuario
+            </button>
+          </div>
+          <p className="admin-hint">
+            El tipo carga permisos por defecto. Después se pueden ajustar. El responsable
+            del Timer sale de acá: legajo, apellido y nombre.
+          </p>
+          {busy ? <p className="muted">Cargando…</p> : null}
+          {usuarios.filter((u) => {
+            const q = normalizarTexto(userFiltro.trim());
+            if (!q) return true;
+            return normalizarTexto(
+              [u.legajo, u.apellido, u.nombres, u.nombre_mostrar, u.nombre_usuario, u.email, u.roles_texto].join(' '),
+            ).includes(q);
+          }).length === 0 && !busy ? (
+            <p className="muted">Ningún usuario coincide con el filtro.</p>
+          ) : (
+            <div className="xlsx-scroll">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Legajo</th>
+                    <th>Apellido y nombre</th>
+                    <th>Email</th>
+                    <th>Tipo</th>
+                    <th>Secciones</th>
+                    <th>Estado</th>
+                    <th className="admin-row-actions">Acciones</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usuarios
+                    .filter((u) => {
+                      const q = normalizarTexto(userFiltro.trim());
+                      if (!q) return true;
+                      return normalizarTexto(
+                        [u.legajo, u.apellido, u.nombres, u.nombre_mostrar, u.nombre_usuario, u.email, u.roles_texto].join(' '),
+                      ).includes(q);
+                    })
+                    .map((row) => (
+                      <tr key={row.id} className={row.estado === 'ACTIVO' ? undefined : 'is-off'}>
+                        <td>{row.legajo || '—'}</td>
+                        <td>{apellidoYNombre(row) || row.nombre_mostrar}</td>
+                        <td>{row.email || row.nombre_usuario || '—'}</td>
+                        <td>{row.roles_texto}</td>
+                        <td>
+                          {row.secciones_todas
+                            ? 'Todas'
+                            : row.secciones.length
+                              ? row.secciones.map((s) => etiquetaSeccion(s)).join(' · ')
+                              : '—'}
+                        </td>
+                        <td>{row.estado}</td>
+                        <td className="admin-row-actions">
+                          <button
+                            type="button"
+                            className="btn secondary sm"
+                            onClick={() => abrirUsuario(row)}
+                          >
+                            Modificar
+                          </button>
+                          <button
+                            type="button"
+                            className="btn ghost sm"
+                            onClick={() => void resetearClave(row)}
+                          >
+                            Resetear
+                          </button>
+                          <button
+                            type="button"
+                            className="btn ghost sm"
+                            onClick={() => void toggleUsuario(row)}
+                          >
+                            {row.estado === 'ACTIVO' ? 'Desactivar' : 'Activar'}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn ghost sm"
+                            onClick={() => void eliminarUsuario(row)}
+                          >
+                            Borrar
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      ) : null}
+
       {tab === 'apariencia' ? (
         <section className="panel">
           <h2 className="admin-section-title">Apariencia</h2>
@@ -1501,10 +1859,41 @@ export function AdministrationPage() {
         </section>
       ) : null}
 
+      {tab === 'registro' ? (
+        <section className="panel">
+          <p className="admin-hint">
+            Quién hizo qué. Las contraseñas no se muestran.
+          </p>
+          {busy && !registro.length ? <p className="muted">Cargando…</p> : null}
+          {!busy && !registro.length ? (
+            <p className="muted">Todavía no hay movimientos.</p>
+          ) : (
+            <ol className="audit-log">
+              {registro.map((f) => (
+                <li key={f.id} className="audit-line">
+                  <time dateTime={f.ocurrido_en}>
+                    {new Date(f.ocurrido_en).toLocaleString('es-AR', {
+                      day: '2-digit',
+                      month: '2-digit',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </time>
+                  <strong>{f.usuario}</strong>
+                  <span>{f.detalle}</span>
+                </li>
+              ))}
+            </ol>
+          )}
+        </section>
+      ) : null}
+
       {tab !== 'inspectores' &&
       tab !== 'licencias' &&
       tab !== 'motivos' &&
       tab !== 'moviles' &&
+      tab !== 'usuarios' &&
+      tab !== 'registro' &&
       tab !== 'apariencia' ? (
         <section className="panel">
           {busy ? <p className="muted">Cargando…</p> : null}
@@ -1591,9 +1980,17 @@ export function AdministrationPage() {
                   })
                 }
               >
-                {(['Peajes', 'Seguridad Vial'] as const).map((grupo) => (
+                {(['Peajes', 'Seguridad Vial'] as const)
+                  .filter((grupo) =>
+                    SECCIONES_SV_SORTED.some(
+                      (s) => s.grupo === grupo && veSeccion(alcance, s.id),
+                    ),
+                  )
+                  .map((grupo) => (
                   <optgroup key={grupo} label={grupo}>
-                    {SECCIONES_SV_SORTED.filter((s) => s.grupo === grupo).map((s) => (
+                    {SECCIONES_SV_SORTED.filter(
+                      (s) => s.grupo === grupo && veSeccion(alcance, s.id),
+                    ).map((s) => (
                       <option key={s.id} value={s.id}>
                         {s.label}
                       </option>
@@ -1773,7 +2170,7 @@ export function AdministrationPage() {
       <Modal
         open={Boolean(historial)}
         onClose={() => setHistorial(null)}
-        title={historial ? `Apertura · ${historial.nombre}` : 'Apertura'}
+        title={historial ? `Historial · ${historial.nombre}` : 'Historial'}
         description="Dónde estuvo. Si cambia de sección o de secuencia, el período anterior se cierra y no se pisa."
         size="md"
         footer={
@@ -2081,6 +2478,233 @@ export function AdministrationPage() {
               </div>
             )}
           </form>
+        ) : null}
+      </Modal>
+
+      <Modal
+        open={Boolean(userForm)}
+        onClose={() => setUserForm(null)}
+        title={userForm?.id ? 'Modificar usuario' : 'Incorporar usuario'}
+        description={
+          userForm?.id
+            ? 'La contraseña se guarda cifrada; el admin no la ve. Para una nueva, Resetear.'
+            : 'Al guardar se genera una temporal (se muestra una vez) y se guarda cifrada.'
+        }
+        size="md"
+        footer={
+          <>
+            <button type="button" className="btn secondary" onClick={() => setUserForm(null)}>
+              Cancelar
+            </button>
+            <button type="submit" form="user-form" className="btn primary" disabled={busy}>
+              Guardar
+            </button>
+          </>
+        }
+      >
+        {userForm ? (
+          <form id="user-form" className="form-grid" onSubmit={(e) => void guardarUsuario(e)}>
+            <div className="field">
+              <label htmlFor="usr-leg">Legajo</label>
+              <input
+                id="usr-leg"
+                value={userForm.legajo}
+                onChange={(e) => setUserForm({ ...userForm, legajo: e.target.value })}
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="usr-nombre">Apellido y nombre</label>
+              <input
+                id="usr-nombre"
+                value={userForm.nombre}
+                onChange={(e) => setUserForm({ ...userForm, nombre: e.target.value })}
+                placeholder="Acosta, Juan"
+                required
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="usr-mail">Email</label>
+              <input
+                id="usr-mail"
+                type="email"
+                autoComplete="off"
+                value={userForm.email}
+                onChange={(e) => setUserForm({ ...userForm, email: e.target.value })}
+                required
+              />
+            </div>
+            {userForm.id ? (
+              <div className="field">
+                <label htmlFor="usr-est">Estado</label>
+                <select
+                  id="usr-est"
+                  value={userForm.estado}
+                  onChange={(e) =>
+                    setUserForm({
+                      ...userForm,
+                      estado: e.target.value === 'INACTIVO' ? 'INACTIVO' : 'ACTIVO',
+                    })
+                  }
+                >
+                  <option value="ACTIVO">Activo</option>
+                  <option value="INACTIVO">Inactivo</option>
+                </select>
+              </div>
+            ) : null}
+            <div className="field">
+              <span>Tipo de permiso</span>
+              <div className="seq-choices" role="listbox" aria-label="Tipo de permiso">
+                {(rolesCat.filter((r) => r.codigo !== ROLE_CODES.ADMIN_SV).length
+                  ? rolesCat.filter((r) => r.codigo !== ROLE_CODES.ADMIN_SV)
+                  : ROLE_TIPO_ORDEN.map((codigo) => ({
+                      codigo,
+                      nombre: ROLE_META[codigo].nombre,
+                      descripcion: ROLE_META[codigo].descripcion,
+                      permisos: defaultsDeTipo(codigo),
+                    }))
+                ).map((r) => {
+                  const meta = ROLE_META[r.codigo as RoleCode];
+                  const on = userForm.tipo === r.codigo;
+                  return (
+                    <button
+                      key={r.codigo}
+                      type="button"
+                      role="option"
+                      aria-selected={on}
+                      className={`seq-choice${on ? ' is-on' : ''}`}
+                      onClick={() => {
+                        const tipo = r.codigo as RoleCode;
+                        setUserForm({
+                          ...userForm,
+                          tipo,
+                          permisos: defaultsRol(rolesCat, tipo),
+                          secciones_todas:
+                            tipo === ROLE_CODES.ADMIN_SYS ? true : userForm.secciones_todas,
+                        });
+                      }}
+                    >
+                      {meta?.nombre ?? r.nombre}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="tipo-desc">
+                {ROLE_META[userForm.tipo]?.descripcion ??
+                  rolesCat.find((r) => r.codigo === userForm.tipo)?.descripcion ??
+                  ''}
+              </p>
+            </div>
+            <div className="field">
+              <span>Permisos</span>
+              <div className="perm-groups">
+                {PERMISSION_GROUPS.map((g) => (
+                  <div key={g.id} className="perm-group">
+                    <h4>{g.label}</h4>
+                    <div className="perm-list">
+                      {g.items.map((item) => {
+                        const on = userForm.permisos.includes(item.codigo);
+                        return (
+                          <label
+                            key={item.codigo}
+                            className="perm-item"
+                            title={item.descripcion}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={on}
+                              onChange={() =>
+                                setUserForm({
+                                  ...userForm,
+                                  permisos: on
+                                    ? userForm.permisos.filter((x) => x !== item.codigo)
+                                    : [...userForm.permisos, item.codigo],
+                                })
+                              }
+                            />
+                            <span className="perm-item-text">
+                              <span>{item.label}</span>
+                              <span className="perm-item-hint">{item.descripcion}</span>
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="field" style={{ gridColumn: '1 / -1' }}>
+              <span>Secciones</span>
+              <div className="seq-choices">
+                <button
+                  type="button"
+                  className={`seq-choice${userForm.secciones_todas ? ' is-on' : ''}`}
+                  onClick={() =>
+                    setUserForm({
+                      ...userForm,
+                      secciones_todas: !userForm.secciones_todas,
+                      secciones: userForm.secciones_todas ? userForm.secciones : [],
+                    })
+                  }
+                >
+                  Todas
+                </button>
+                {SECCIONES_SV_SORTED.map((s) => {
+                  const on = userForm.secciones.includes(s.id);
+                  return (
+                    <button
+                      key={s.id}
+                      type="button"
+                      className={`seq-choice${on ? ' is-on' : ''}`}
+                      disabled={userForm.secciones_todas}
+                      onClick={() =>
+                        setUserForm({
+                          ...userForm,
+                          secciones: on
+                            ? userForm.secciones.filter((x) => x !== s.id)
+                            : [...userForm.secciones, s.id],
+                        })
+                      }
+                    >
+                      {s.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </form>
+        ) : null}
+      </Modal>
+
+      <Modal
+        open={Boolean(claveUnaVez)}
+        onClose={() => setClaveUnaVez(null)}
+        title="Contraseña temporal"
+        description={`Copiala ahora y dásela a ${claveUnaVez?.quien ?? 'la persona'}. No se vuelve a mostrar.`}
+        size="sm"
+        dismissOnBackdrop={false}
+        footer={
+          <>
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={() => {
+                if (claveUnaVez) void navigator.clipboard.writeText(claveUnaVez.clave);
+              }}
+            >
+              Copiar
+            </button>
+            <button type="button" className="btn primary" onClick={() => setClaveUnaVez(null)}>
+              Listo
+            </button>
+          </>
+        }
+      >
+        {claveUnaVez ? (
+          <div className="field">
+            <label htmlFor="usr-clave-tmp">Contraseña</label>
+            <input id="usr-clave-tmp" readOnly value={claveUnaVez.clave} />
+          </div>
         ) : null}
       </Modal>
     </div>

@@ -12,9 +12,9 @@ import {
   Min,
   MinLength,
 } from 'class-validator';
-import { ROLE_CODES } from '@plataforma/shared';
+import { PERMISSION_CODES, ROLE_CODES } from '@plataforma/shared';
 import { CurrentUser, RequestUser } from '../identity/current-user.decorator';
-import { Roles, RolesGuard } from '../identity/roles.guard';
+import { Permissions, Roles, RolesGuard } from '../identity/roles.guard';
 import { ScheduleEngineService } from './schedule-engine.service';
 
 class DesdoblesDto {
@@ -183,6 +183,7 @@ export class ScheduleEngineController {
 
   @Post('preview')
   @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE)
+  @Permissions(PERMISSION_CODES.CUADRATURA_PLANIFICAR, PERMISSION_CODES.CUADRATURA_EDITAR)
   preview(@Body() body: ProjectDto) {
     return this.engine.preview(body.date_from, body.date_to);
   }
@@ -192,7 +193,8 @@ export class ScheduleEngineController {
    * quiénes son, más los totales por día y por móvil. Solo lee.
    */
   @Post('ocupacion')
-  @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE, ROLE_CODES.CONSULTA)
+  @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE, ROLE_CODES.CONSULTA, ROLE_CODES.RH, ROLE_CODES.AUDITOR)
+  @Permissions(PERMISSION_CODES.CUADRATURA_VER)
   ocupacion(@Body() body: OcupacionDto) {
     return this.engine.ocupacion(body.date_from, body.date_to, {
       sinDesdoblar: body.sin_desdoblar ?? false,
@@ -206,6 +208,7 @@ export class ScheduleEngineController {
    */
   @Post('desdobles/preview')
   @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE)
+  @Permissions(PERMISSION_CODES.CUADRATURA_PLANIFICAR, PERMISSION_CODES.CUADRATURA_EDITAR)
   previewDesdobles(@Body() body: DesdoblesDto) {
     return this.engine.previewDesdobles(
       body.date_from,
@@ -216,6 +219,7 @@ export class ScheduleEngineController {
 
   @Post('apply')
   @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS)
+  @Permissions(PERMISSION_CODES.CUADRATURA_PLANIFICAR)
   apply(@Body() body: ProjectDto, @CurrentUser() user: RequestUser) {
     return this.engine.apply(body.date_from, body.date_to, user.userId);
   }
@@ -223,6 +227,7 @@ export class ScheduleEngineController {
   /** Tabula rasa de toda la capa PLANIFICADA. */
   @Post('wipe-planificada')
   @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS)
+  @Permissions(PERMISSION_CODES.CUADRATURA_PLANIFICAR)
   wipePlanificada(@Body() body: WipeDto, @CurrentUser() user: RequestUser) {
     return this.engine.wipePlanificada(user.userId, body.reason);
   }
@@ -230,6 +235,7 @@ export class ScheduleEngineController {
   /** Materializa REAL = PLAN + asignaciones operativas (dupla). */
   @Post('apply-real')
   @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE)
+  @Permissions(PERMISSION_CODES.CUADRATURA_EDITAR)
   applyReal(@Body() body: ProjectDto, @CurrentUser() user: RequestUser) {
     return this.engine.applyReal(body.date_from, body.date_to, user.userId);
   }
@@ -237,6 +243,7 @@ export class ScheduleEngineController {
   /** Registra intercambio Haro–Ramos en asignacion_operativa (no toca PLAN). */
   @Post('linked-pair/swap')
   @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE)
+  @Permissions(PERMISSION_CODES.CUADRATURA_EDITAR)
   linkedPairSwap(@Body() body: PairSwapDto, @CurrentUser() user: RequestUser) {
     return this.engine.registerLinkedPairSwap(
       body.date_from,
@@ -249,6 +256,7 @@ export class ScheduleEngineController {
   /** Enroque entre dos inspectores cualquiera (overlays; no toca PLAN). */
   @Post('swap')
   @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE)
+  @Permissions(PERMISSION_CODES.CUADRATURA_EDITAR)
   inspectorSwap(
     @Body() body: InspectorSwapDto,
     @CurrentUser() user: RequestUser,
@@ -267,6 +275,7 @@ export class ScheduleEngineController {
   /** Cambio de turno y/o móvil por un rango (overlay REAL; no toca PLAN). */
   @Post('assignment')
   @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE)
+  @Permissions(PERMISSION_CODES.CUADRATURA_EDITAR)
   assignment(@Body() body: AssignmentDto, @CurrentUser() user: RequestUser) {
     return this.engine.registerOperationalAssignment({
       inspectorId: body.inspector_id,
@@ -283,6 +292,7 @@ export class ScheduleEngineController {
   /** Vacación / licencia / feriado / enfermedad operativa (overlay REAL). */
   @Post('absence')
   @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE)
+  @Permissions(PERMISSION_CODES.CUADRATURA_EDITAR)
   absence(@Body() body: AbsenceDto, @CurrentUser() user: RequestUser) {
     return this.engine.registerOperationalAbsence({
       inspectorId: body.inspector_id,
@@ -299,6 +309,7 @@ export class ScheduleEngineController {
   /** Saca overlays de Real en un rango; esos días vuelven a Ideal. */
   @Post('clear-range')
   @Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE)
+  @Permissions(PERMISSION_CODES.CUADRATURA_EDITAR)
   clearRange(@Body() body: ClearRangeDto, @CurrentUser() user: RequestUser) {
     return this.engine.clearOperationalRange({
       inspectorId: body.inspector_id ?? null,

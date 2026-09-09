@@ -9,9 +9,9 @@ import {
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { IsOptional, IsString, MinLength } from 'class-validator';
-import { ROLE_CODES } from '@plataforma/shared';
+import { PERMISSION_CODES, ROLE_CODES } from '@plataforma/shared';
 import { CurrentUser, RequestUser } from '../identity/current-user.decorator';
-import { Roles, RolesGuard } from '../identity/roles.guard';
+import { Permissions, Roles, RolesGuard } from '../identity/roles.guard';
 import { PlanningService } from './planning.service';
 
 class ObserveDto {
@@ -47,12 +47,14 @@ export class PlanningController {
 
   @Post(':id/submit')
   @Roles(ROLE_CODES.ADMIN_SV)
+  @Permissions(PERMISSION_CODES.PLANIFICACION_ENVIAR_REVISION)
   submit(@Param('id') id: string, @CurrentUser() user: RequestUser) {
     return this.planning.submit(id, user.userId);
   }
 
   @Post(':id/observe')
   @Roles(ROLE_CODES.JEFE)
+  @Permissions(PERMISSION_CODES.PLANIFICACION_OBSERVAR)
   observe(
     @Param('id') id: string,
     @Body() body: ObserveDto,
@@ -63,18 +65,21 @@ export class PlanningController {
 
   @Post(':id/reopen')
   @Roles(ROLE_CODES.ADMIN_SV)
+  @Permissions(PERMISSION_CODES.PLANIFICACION_CREAR)
   reopen(@Param('id') id: string, @CurrentUser() user: RequestUser) {
     return this.planning.reopen(id, user.userId);
   }
 
   @Post(':id/approve-and-publish')
   @Roles(ROLE_CODES.JEFE)
+  @Permissions(PERMISSION_CODES.PLANIFICACION_APROBAR_PUBLICAR)
   approve(@Param('id') id: string, @CurrentUser() user: RequestUser) {
     return this.planning.approveAndPublish(id, user.userId);
   }
 
   @Post(':id/close')
   @Roles(ROLE_CODES.JEFE)
+  @Permissions(PERMISSION_CODES.PLANIFICACION_CERRAR)
   close(@Param('id') id: string, @CurrentUser() user: RequestUser) {
     return this.planning.close(id, user.userId);
   }

@@ -5,7 +5,8 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import type { AuthUserDto, RoleCode } from '@plataforma/shared';
+import type { AuthUserDto, PermissionCode, RoleCode } from '@plataforma/shared';
+import { ADMIN_PERMISSIONS } from '@plataforma/shared';
 import { login as apiLogin, me } from './api';
 
 type AuthState = {
@@ -14,6 +15,8 @@ type AuthState = {
   login: (username: string, password: string) => Promise<void>;
   logout: () => void;
   hasRole: (...roles: RoleCode[]) => boolean;
+  hasPermission: (...codes: PermissionCode[]) => boolean;
+  canAdmin: boolean;
 };
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -50,8 +53,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return roles.some((r) => user.roles.includes(r));
   }
 
+  function hasPermission(...codes: PermissionCode[]) {
+    if (!user) return false;
+    const have = user.permissions ?? [];
+    return codes.some((c) => have.includes(c));
+  }
+
+  const canAdmin = ADMIN_PERMISSIONS.some((c) => (user?.permissions ?? []).includes(c));
+
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, hasRole }}>
+    <AuthContext.Provider
+      value={{ user, loading, login, logout, hasRole, hasPermission, canAdmin }}
+    >
       {children}
     </AuthContext.Provider>
   );

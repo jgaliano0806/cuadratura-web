@@ -12,6 +12,7 @@ function nombreVisible(p: PersonaLabel): string {
   const nom = p.nombres?.trim();
   if (ape && nom) return `${ape}, ${nom}`;
   if (ape) return ape;
+  if (nom) return nom;
   return (p.inspector || p.nombre_completo || p.posicion_codigo || '').trim();
 }
 

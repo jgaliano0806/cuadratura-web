@@ -20,6 +20,7 @@ import {
 } from '../components/schedule';
 import { PlantelSwitch } from '../components/PlantelSwitch';
 import {
+  ambitosDelAlcance,
   etiquetaPersonaRol,
   etiquetaPersonas,
   etiquetaSeccion,
@@ -27,12 +28,15 @@ import {
   parsePlanteles,
   plantelListo,
   plantelPorDefecto,
+  plantelesDelAlcance,
   PLANTELES,
   seccionesDePlanteles,
   type AmbitoId,
   type PlantelId,
 } from '../lib/plantel';
 import { apellidoYNombre, legajoMostrar } from '../lib/personLabel';
+import { useAuth } from '../lib/auth';
+import { PERMISSION_CODES } from '@plataforma/shared';
 import { useGridColWidths } from '../lib/useGridColWidths';
 import {
   addIsoDays,
@@ -48,8 +52,10 @@ import {
   toDateOnly,
   weekdayAbbrev,
   cellShortLabel,
+  diaPasa,
   type BoardResponse,
   type DayRow,
+  type FiltrosGrilla,
 } from '../lib/scheduleUtils';
 import { useBoxTheme } from '../lib/boxTheme';
 import { useCuadPaneles } from '../lib/cuadPaneles';
@@ -193,13 +199,6 @@ function esFinDeSemana(f: string): boolean {
   return d === 0 || d === 6;
 }
 
-type FiltrosGrilla = {
-  inspectores: string[];
-  licencias: string[];
-  moviles: string[];
-  turnos: string[];
-};
-
 type Seleccion = {
   cell: DayRow;
   focus: string;
@@ -228,22 +227,6 @@ function parseCodigo(valor: string): {
   if (valor === 'A:ENFERMEDAD') return { kind: 'ENFERMEDAD' };
   if (valor.startsWith('L:')) return { kind: 'LICENCIA', licenciaId: valor.slice(2) };
   return null;
-}
-
-function diaPasa(d: DayRow, f: FiltrosGrilla): boolean {
-  if (f.moviles.length && (d.movil == null || !f.moviles.includes(String(d.movil)))) {
-    return false;
-  }
-  if (f.turnos.length && (!d.turno || !f.turnos.includes(d.turno))) return false;
-  if (f.licencias.length) {
-    const codigos = new Set<string>();
-    if (d.licencia_codigo) codigos.add(d.licencia_codigo);
-    if (d.codigo) codigos.add(d.codigo);
-    const corto = cellShortLabel(d);
-    if (corto) codigos.add(corto);
-    if (![...codigos].some((c) => f.licencias.includes(c))) return false;
-  }
-  return true;
 }
 
 function agrupar(
@@ -757,13 +740,27 @@ function Grilla({
 
 export function CuadraturaPage() {
   const toast = useToast();
+  const { user, hasPermission } = useAuth();
+  const puedeEditar = hasPermission(PERMISSION_CODES.CUADRATURA_EDITAR);
+  const puedePlanificar = hasPermission(PERMISSION_CODES.CUADRATURA_PLANIFICAR);
   const [params, setParams] = useSearchParams();
   const inicial = useMemo(() => monthBounds(iso(new Date())), []);
   const hoy = useMemo(() => iso(new Date()), []);
   const capa: Vista = params.get('vista') === 'real' ? 'real' : 'plan';
-  const ambito = parseAmbito(params.get('ambito'), params.get('plantel'));
-  const planteles = parsePlanteles(params.get('plantel'), ambito);
-  const plantel = planteles[0] ?? plantelPorDefecto(ambito);
+  const alcance = useMemo(
+    () => ({
+      seccionesTodas: user?.seccionesTodas ?? true,
+      secciones: user?.secciones ?? [],
+    }),
+    [user],
+  );
+  const permitidos = useMemo(() => plantelesDelAlcance(alcance), [alcance]);
+  const ambitosOk = useMemo(() => ambitosDelAlcance(alcance), [alcance]);
+  const sinAlcance = Boolean(user) && !alcance.seccionesTodas && alcance.secciones.length === 0;
+  const ambitoRaw = parseAmbito(params.get('ambito'), params.get('plantel'));
+  const ambito = ambitosOk.includes(ambitoRaw) ? ambitoRaw : (ambitosOk[0] ?? ambitoRaw);
+  const planteles = parsePlanteles(params.get('plantel'), ambito, permitidos);
+  const plantel = planteles[0] ?? plantelPorDefecto(ambito, permitidos);
   const { boxes } = useBoxTheme();
   const { paneles } = useCuadPaneles();
   const leyendaBoxes = useMemo(() => boxes.filter((b) => b.visible), [boxes]);
@@ -1248,7 +1245,7 @@ export function CuadraturaPage() {
       (prev) => {
         const n = new URLSearchParams(prev);
         n.set('ambito', id);
-        n.set('plantel', plantelPorDefecto(id));
+        n.set('plantel', plantelPorDefecto(id, permitidos));
         return n;
       },
       { replace: true },
@@ -1257,7 +1254,7 @@ export function CuadraturaPage() {
   }
 
   function setPlanteles(ids: PlantelId[]) {
-    const next = ids.length ? ids : [plantelPorDefecto(ambito)];
+    const next = ids.length ? ids : [plantelPorDefecto(ambito, permitidos)];
     setParams(
       (prev) => {
         const n = new URLSearchParams(prev);
@@ -1342,6 +1339,7 @@ export function CuadraturaPage() {
   );
 
   useEffect(() => {
+    if (!puedePlanificar) return;
     if (!hueco || ocupado) return;
     const key = `${hueco.from}:${hueco.to}`;
     if (falloHueco === key || pedidoHuecoRef.current === key) return;
@@ -1350,7 +1348,7 @@ export function CuadraturaPage() {
       pedidoHuecoRef.current = '';
       setFalloHueco(key);
     });
-  }, [hueco, ocupado, falloHueco, inferirRango, desdeVista, hastaVista]);
+  }, [puedePlanificar, hueco, ocupado, falloHueco, inferirRango, desdeVista, hastaVista]);
 
   async function recargarReal() {
     const { reales: r } = await recargarVersiones();
@@ -1388,8 +1386,8 @@ export function CuadraturaPage() {
   function reasonOperativo() {
     const m = cbMotivo.trim();
     const o = cbObservacion.trim();
-    if (m && o) return `${m} · ${o}`;
-    return m || o || undefined;
+    if (!m && !o) return undefined;
+    return `${m} · ${o}`;
   }
 
   function pedirCambio(e: FormEvent) {
@@ -1782,6 +1780,8 @@ export function CuadraturaPage() {
             planteles={planteles}
             onAmbito={setAmbito}
             onPlanteles={setPlanteles}
+            permitidos={permitidos}
+            ambitos={ambitosOk}
           >
             <div className="cuad-vista" role="tablist" aria-label="Capa">
               <button
@@ -1923,7 +1923,12 @@ export function CuadraturaPage() {
         </form>
       </header>
 
-      {!plantelOk ? (
+      {sinAlcance ? (
+        <EmptyState
+          title="Sin secciones"
+          description="Pedile a un administrador que te asigne las secciones que podés ver."
+        />
+      ) : !plantelOk ? (
         <EmptyState
           title={`${plantelLabel} próximamente`}
           description="Este plantel se habilita cuando estén cargados sus códigos y personas."
@@ -2086,7 +2091,10 @@ export function CuadraturaPage() {
                   onClose={() => setSeleccion(null)}
                 />
               ) : null}
-              {!esIdeal ? (
+              {!esIdeal && !puedeEditar ? (
+                <p className="muted">Solo lectura. Este tipo no edita el Real.</p>
+              ) : null}
+              {!esIdeal && puedeEditar ? (
                     <form className="cuad-change" onSubmit={pedirCambio}>
                       {diasForm > 0 ? (
                       <p className="cuad-side-range">
@@ -2282,6 +2290,13 @@ export function CuadraturaPage() {
                     to={hastaVista}
                     enabled
                     parte={p.id === 'ocupacion' ? 'ocupacion' : 'desdobles'}
+                    filtros={filtros}
+                    board={board}
+                    people={inspectoresVista}
+                    catalogo={catalogoInspectores}
+                    moviles={movilesActivos}
+                    licencias={licencias}
+                    esIdeal={esIdeal}
                   />
                 )}
               </div>

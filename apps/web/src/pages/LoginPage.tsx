@@ -1,16 +1,21 @@
 import { FormEvent, useState } from 'react';
 import { Navigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
-import { ApiError } from '../lib/api';
+import { api, ApiError } from '../lib/api';
 import { BrandMark } from '../components/BrandMark';
 import { ThemeToggle } from '../components/ThemeToggle';
+import { Modal } from '../components/ui';
 
 export function LoginPage() {
   const { user, login } = useAuth();
-  const [username, setUsername] = useState('admin_sv');
+  const [username, setUsername] = useState('admin_sv@casisa.local');
   const [password, setPassword] = useState('AdminSV123!');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [olvido, setOlvido] = useState(false);
+  const [olvidoUser, setOlvidoUser] = useState('');
+  const [olvidoBusy, setOlvidoBusy] = useState(false);
+  const [olvidoOk, setOlvidoOk] = useState(false);
 
   if (user) return <Navigate to="/inspectores" replace />;
 
@@ -24,6 +29,23 @@ export function LoginPage() {
       setError(err instanceof ApiError ? err.message : 'No se pudo iniciar sesión');
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function pedirReset(e: FormEvent) {
+    e.preventDefault();
+    setOlvidoBusy(true);
+    try {
+      await api('/auth/password-reset', {
+        method: 'POST',
+        body: JSON.stringify({ username: olvidoUser.trim() }),
+      });
+      setOlvidoOk(true);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'No se pudo enviar el pedido.');
+      setOlvido(false);
+    } finally {
+      setOlvidoBusy(false);
     }
   }
 
@@ -49,17 +71,18 @@ export function LoginPage() {
 
         <form onSubmit={onSubmit}>
           <div className="field">
-            <label htmlFor="username">Usuario</label>
+            <label htmlFor="username">Email</label>
             <input
               id="username"
+              type="email"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              autoComplete="username"
+              autoComplete="email"
               required
             />
           </div>
           <div className="field">
-            <label htmlFor="password">Clave</label>
+            <label htmlFor="password">Contraseña</label>
             <input
               id="password"
               type="password"
@@ -72,8 +95,63 @@ export function LoginPage() {
           <button className="btn" type="submit" disabled={busy}>
             {busy ? 'Ingresando…' : 'Ingresar'}
           </button>
+          <button
+            type="button"
+            className="login-forgot"
+            onClick={() => {
+              setOlvidoUser(username);
+              setOlvidoOk(false);
+              setOlvido(true);
+            }}
+          >
+            ¿Olvidaste la contraseña?
+          </button>
         </form>
       </div>
+
+      <Modal
+        open={olvido}
+        onClose={() => setOlvido(false)}
+        title="Olvidé la contraseña"
+        description="Administración la resetea y te da una temporal. El pedido queda en Actividad."
+        size="sm"
+        footer={
+          olvidoOk ? (
+            <button type="button" className="btn primary" onClick={() => setOlvido(false)}>
+              Listo
+            </button>
+          ) : (
+            <>
+              <button type="button" className="btn secondary" onClick={() => setOlvido(false)}>
+                Cancelar
+              </button>
+              <button type="submit" form="olvido-form" className="btn primary" disabled={olvidoBusy}>
+                Enviar pedido
+              </button>
+            </>
+          )
+        }
+      >
+        {olvidoOk ? (
+          <p className="muted">
+            Si esa cuenta existe, Administración ya ve el pedido. Pediles la temporal.
+          </p>
+        ) : (
+          <form id="olvido-form" className="form-grid" onSubmit={(e) => void pedirReset(e)}>
+            <div className="field">
+              <label htmlFor="olvido-user">Email</label>
+              <input
+                id="olvido-user"
+                type="email"
+                value={olvidoUser}
+                onChange={(e) => setOlvidoUser(e.target.value)}
+                autoComplete="email"
+                required
+              />
+            </div>
+          </form>
+        )}
+      </Modal>
     </div>
   );
 }

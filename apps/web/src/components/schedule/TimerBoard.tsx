@@ -6,6 +6,7 @@ import {
   rowKey,
   shiftMonth,
   toDateOnly,
+  iso,
   weekdayAbbrev,
   weekdayLong,
   cellShortLabel,
@@ -13,6 +14,8 @@ import {
   type DayRow,
 } from '../../lib/scheduleUtils';
 import { DateField, ExcelMenu, PeoplePicker, SearchSelect, useToast, type Person } from '../ui';
+import { useAuth } from '../../lib/auth';
+import { PERMISSION_CODES } from '@plataforma/shared';
 import { isoToDmy } from '../../lib/dateRange';
 import { apellidoYNombre, legajoMostrar } from '../../lib/personLabel';
 
@@ -160,6 +163,31 @@ function elegirVersion(versiones: Version[], desde: string, hasta: string): Vers
   return best;
 }
 
+function esMotivoGenerado(t: string): boolean {
+  const s = t.trim();
+  if (!s) return true;
+  if (/^[A-Z0-9]{1,5}\s*→\s*[A-Z0-9]{1,5}$/i.test(s)) return true;
+  if (/\d{4}-\d{2}-\d{2}\s*→/.test(s)) return true;
+  if (/^Volver a Ideal/i.test(s)) return true;
+  return false;
+}
+
+function partirMotivoOverlay(raw?: string | null): { motivo: string; observacion: string } {
+  let t = (raw || '').trim();
+  if (!t) return { motivo: '', observacion: '' };
+  t = t.replace(/\s*\([^)]*⇄[^)]*\)\s*$/u, '').trim();
+  const sep = ' · ';
+  const i = t.indexOf(sep);
+  if (i >= 0) {
+    const motivo = t.slice(0, i).trim();
+    const observacion = t.slice(i + sep.length).trim();
+    if (esMotivoGenerado(motivo)) return { motivo: '', observacion };
+    return { motivo, observacion };
+  }
+  if (esMotivoGenerado(t)) return { motivo: '', observacion: '' };
+  return { motivo: t, observacion: '' };
+}
+
 function listarTimerAuto(
   plan: BoardResponse | null,
   real: BoardResponse | null,
@@ -175,6 +203,7 @@ function listarTimerAuto(
     const fuente = (d.inspector_id && personas.get(d.inspector_id)) || d;
     const ideal = cellShortLabel(otra);
     const real = cellShortLabel(d);
+    const { motivo, observacion } = partirMotivoOverlay(d.motivo_operativo);
     filas.push({
       id: `auto-${rowKey(d)}|${d.fecha_operativa}`,
       origen: 'auto',
@@ -184,8 +213,8 @@ function listarTimerAuto(
       persona: apellidoYNombre(fuente),
       ideal,
       real,
-      motivo: '',
-      observacion: '',
+      motivo,
+      observacion,
     });
   }
   return filas.sort(
@@ -207,15 +236,19 @@ export function TimerBoard({
   real: realGrilla,
   people,
 }: Props) {
+  const { hasPermission } = useAuth();
+  const puedeCargar = hasPermission(PERMISSION_CODES.TIMER_CARGAR);
   const toast = useToast();
   const [abierto, setAbierto] = useState(true);
   const [propio, setPropio] = useState<{ from: string; to: string } | null>(null);
   const [extras, setExtras] = useState<TimerFila[]>([]);
   const [edits, setEdits] = useState<Record<string, TimerFila>>({});
   const [quitados, setQuitados] = useState<string[]>([]);
-  const [dia, setDia] = useState('');
+  const [filtroDesde, setFiltroDesde] = useState('');
+  const [filtroHasta, setFiltroHasta] = useState('');
+  const [diaFoco, setDiaFoco] = useState('');
   const [busy, setBusy] = useState(false);
-  const [fechaAlta, setFechaAlta] = useState(fromGrilla);
+  const [altaAbierta, setAltaAbierta] = useState(false);
   const desde = propio?.from ?? fromGrilla;
   const hasta = propio?.to ?? toGrilla;
   const [inspector, setInspector] = useState('');
@@ -242,7 +275,16 @@ export function TimerBoard({
   const auto = useMemo(() => listarTimerAuto(plan, real, personas), [plan, real, personas]);
   const filasBorrador = useMemo(() => {
     const quit = new Set(quitados);
-    const autos = auto.filter((a) => !quit.has(a.id)).map((a) => edits[a.id] ?? a);
+    const autos = auto.filter((a) => !quit.has(a.id)).map((a) => {
+      const e = edits[a.id];
+      if (!e) return a;
+      return {
+        ...a,
+        ...e,
+        motivo: e.motivo.trim() ? e.motivo : a.motivo,
+        observacion: e.observacion.trim() ? e.observacion : a.observacion,
+      };
+    });
     return [...autos, ...extras].map((f) => (motivoEsCambio(f) ? { ...f, motivo: '' } : f));
   }, [auto, edits, quitados, extras]);
   const cerrado = Boolean(visto);
@@ -261,11 +303,27 @@ export function TimerBoard({
     for (const f of filas) map.set(f.fecha, (map.get(f.fecha) ?? 0) + 1);
     return [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [filas]);
-
-  const visibles = useMemo(
-    () => (dia ? filas.filter((f) => f.fecha === dia) : filas),
-    [filas, dia],
+  const diasCambio = useMemo(() => diasLista.map(([f]) => f), [diasLista]);
+  const minCambio = diasCambio[0] ?? '';
+  const maxCambio = diasCambio[diasCambio.length - 1] ?? '';
+  const filtroTodo = Boolean(
+    minCambio && filtroDesde === minCambio && filtroHasta === maxCambio,
   );
+
+  const visibles = useMemo(() => {
+    if (!filtroDesde || !filtroHasta) return filas;
+    return filas.filter((f) => f.fecha >= filtroDesde && f.fecha <= filtroHasta);
+  }, [filas, filtroDesde, filtroHasta]);
+  const fechaNovedad = useMemo(() => {
+    if (filtroDesde && filtroHasta && filtroDesde === filtroHasta) return filtroDesde;
+    if (diaFoco && diaFoco >= filtroDesde && diaFoco <= filtroHasta) return diaFoco;
+    if (filtroDesde && diasCambio.includes(filtroDesde)) return filtroDesde;
+    const enRango = diasCambio.find((d) => d >= filtroDesde && d <= filtroHasta);
+    if (enRango) return enRango;
+    const hoy = iso(new Date());
+    if (hoy >= desde && hoy <= hasta) return hoy;
+    return desde;
+  }, [filtroDesde, filtroHasta, diaFoco, diasCambio, desde, hasta]);
   const grupos = useMemo(() => {
     const map = new Map<string, TimerFila[]>();
     for (const f of visibles) {
@@ -279,8 +337,10 @@ export function TimerBoard({
   useEffect(() => {
     setEdits({});
     setQuitados([]);
-    setDia('');
-    setFechaAlta(desde);
+    setFiltroDesde('');
+    setFiltroHasta('');
+    setDiaFoco('');
+    setAltaAbierta(false);
     let cancelado = false;
     void api<ExtraApi[]>(`/operations/timer-extras?from=${desde}&to=${hasta}`)
       .then((rows) => {
@@ -299,6 +359,16 @@ export function TimerBoard({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [desde, hasta]);
+
+  useEffect(() => {
+    if (!minCambio || !maxCambio) {
+      setFiltroDesde('');
+      setFiltroHasta('');
+      return;
+    }
+    setFiltroDesde((d) => (!d || d < minCambio || d > maxCambio ? minCambio : d));
+    setFiltroHasta((h) => (!h || h < minCambio || h > maxCambio ? maxCambio : h));
+  }, [minCambio, maxCambio]);
 
   useEffect(() => {
     let cancelado = false;
@@ -423,6 +493,7 @@ export function TimerBoard({
   }
 
   function guardarExtra(fila: TimerFila) {
+    if (!puedeCargar) return;
     const prev = extraSave.current.get(fila.id);
     if (prev) window.clearTimeout(prev);
     const handle = window.setTimeout(() => {
@@ -461,7 +532,7 @@ export function TimerBoard({
   async function agregar() {
     if (cerrado) return;
     const p = people.find((x) => x.id === inspector);
-    if (!p || !fechaAlta) return;
+    if (!p || !fechaNovedad) return;
     const texto = motivo.trim();
     if (texto.length < 3) return;
     try {
@@ -469,7 +540,7 @@ export function TimerBoard({
         method: 'POST',
         body: JSON.stringify({
           inspector_id: p.id,
-          fecha: fechaAlta,
+          fecha: fechaNovedad,
           motivo: texto,
           observacion: nota.trim(),
         }),
@@ -477,6 +548,8 @@ export function TimerBoard({
       setExtras((prev) => [...prev, extraAFila(row, personas)]);
       setMotivo('');
       setNota('');
+      setInspector('');
+      setAltaAbierta(false);
     } catch (err) {
       toast.push({
         tone: 'error',
@@ -485,25 +558,63 @@ export function TimerBoard({
     }
   }
 
-  async function quitar(id: string) {
+  async function descartarExtra(id: string) {
     if (cerrado) return;
     const actual = filas.find((f) => f.id === id);
-    if (!actual) return;
-    if (actual.origen === 'extra') {
-      try {
-        await api(`/operations/timer-extras/${id}`, { method: 'DELETE' });
-        setExtras((prev) => prev.filter((f) => f.id !== id));
-        toast.push({ tone: 'success', message: 'Novedad sacada del Timer. La cuadratura no se tocó.' });
-      } catch (err) {
-        toast.push({
-          tone: 'error',
-          message: err instanceof ApiError ? err.message : 'No se pudo quitar la novedad.',
-        });
-      }
+    if (!actual || actual.origen !== 'extra') return;
+    try {
+      await api(`/operations/timer-extras/${id}`, { method: 'DELETE' });
+      setExtras((prev) => prev.filter((f) => f.id !== id));
+    } catch (err) {
+      toast.push({
+        tone: 'error',
+        message: err instanceof ApiError ? err.message : 'No se pudo descartar la novedad.',
+      });
+    }
+  }
+
+  function cerrarAlta() {
+    setAltaAbierta(false);
+    setInspector('');
+    setMotivo('');
+    setNota('');
+  }
+
+  function snapCambio(isoFecha: string, hacia: 'desde' | 'hasta'): string {
+    if (!diasCambio.length) return isoFecha;
+    if (diasCambio.includes(isoFecha)) return isoFecha;
+    if (hacia === 'desde') {
+      return diasCambio.find((d) => d >= isoFecha) ?? diasCambio[0];
+    }
+    for (let i = diasCambio.length - 1; i >= 0; i -= 1) {
+      if (diasCambio[i] <= isoFecha) return diasCambio[i];
+    }
+    return diasCambio[diasCambio.length - 1];
+  }
+
+  function aplicarFiltroDesde(v: string) {
+    const a = snapCambio(v, 'desde');
+    setFiltroDesde(a);
+    setFiltroHasta((h) => (h && h < a ? a : h));
+    setDiaFoco(a);
+  }
+
+  function aplicarFiltroHasta(v: string) {
+    const b = snapCambio(v, 'hasta');
+    setFiltroHasta(b);
+    setFiltroDesde((d) => (d && d > b ? b : d));
+    setDiaFoco(b);
+  }
+
+  function toggleDia(f: string) {
+    setDiaFoco(f);
+    if (filtroDesde === f && filtroHasta === f) {
+      setFiltroDesde(minCambio);
+      setFiltroHasta(maxCambio);
       return;
     }
-    aplicarAutos(filas.filter((f) => f.id !== id));
-    toast.push({ tone: 'success', message: 'Línea sacada del Timer. La cuadratura no se tocó.' });
+    setFiltroDesde(f);
+    setFiltroHasta(f);
   }
 
   async function abrirGuardado(id: string) {
@@ -607,12 +718,13 @@ export function TimerBoard({
   }
 
   async function descargar() {
-    if (!filas.length) {
-      toast.push({ tone: 'error', message: 'No hay novedades para este período.' });
+    if (!visibles.length) {
+      toast.push({ tone: 'error', message: 'No hay novedades para exportar con el filtro actual.' });
       return;
     }
     setBusy(true);
     try {
+      const fechasExp = [...new Set(visibles.map((f) => f.fecha))].sort();
       const base = import.meta.env.VITE_API_URL || '/api';
       const res = await fetch(`${base}/exports/timer.xlsx`, {
         method: 'POST',
@@ -621,10 +733,12 @@ export function TimerBoard({
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          from: guardados.find((g) => g.id === visto)?.fecha_desde ?? desde,
-          to: guardados.find((g) => g.id === visto)?.fecha_hasta ?? hasta,
-          filas: filas.map((f) => ({
+          from: fechasExp[0] ?? desde,
+          to: fechasExp[fechasExp.length - 1] ?? hasta,
+          guardado_id: visto || undefined,
+          filas: visibles.map((f) => ({
             fecha: f.fecha,
+            inspector_id: f.inspector_id || undefined,
             legajo: f.legajo === '—' ? '' : f.legajo,
             persona: f.persona,
             origen: f.origen,
@@ -682,22 +796,28 @@ export function TimerBoard({
           ›
         </button>
       </div>
-      {abierto && !esMes ? (
-        <div className="cuad-range" role="group" aria-label="Período del timer">
+      {abierto && minCambio ? (
+        <div className="cuad-range timer-filtro-rango" role="group" aria-label="Filtro de días con cambios">
+          <span className="timer-filtro-lbl">Desde</span>
           <DateField
-            id="timer-desde"
+            id="timer-filtro-desde"
             aria-label="Desde"
-            value={desde}
-            onChange={(v) => aplicarRango(v, hasta)}
+            value={filtroDesde || minCambio}
+            min={minCambio}
+            max={filtroHasta || maxCambio}
+            onChange={aplicarFiltroDesde}
           />
           <span className="cuad-range-sep" aria-hidden>
             –
           </span>
+          <span className="timer-filtro-lbl">Hasta</span>
           <DateField
-            id="timer-hasta"
+            id="timer-filtro-hasta"
             aria-label="Hasta"
-            value={hasta}
-            onChange={(v) => aplicarRango(desde, v)}
+            value={filtroHasta || maxCambio}
+            min={filtroDesde || minCambio}
+            max={maxCambio}
+            onChange={aplicarFiltroHasta}
           />
         </div>
       ) : null}
@@ -765,7 +885,7 @@ export function TimerBoard({
               </select>
             </label>
           ) : null}
-          {!cerrado ? (
+          {!cerrado && puedeCargar ? (
             <button
               type="button"
               className="btn secondary sm"
@@ -777,7 +897,7 @@ export function TimerBoard({
           ) : null}
           <ExcelMenu
             busy={busy}
-            disabled={busy || filas.length === 0}
+            disabled={busy || visibles.length === 0}
             items={[{ id: 'timer', label: 'Timer' }]}
             onPick={() => void descargar()}
           />
@@ -788,12 +908,15 @@ export function TimerBoard({
       </header>
 
           {diasLista.length > 0 ? (
-            <div className="timer-dias" role="tablist" aria-label="Día">
+            <div className="timer-dias" role="group" aria-label="Días">
               <button
                 type="button"
-                role="tab"
-                className={dia ? undefined : 'active'}
-                onClick={() => setDia('')}
+                className={filtroTodo ? 'active' : undefined}
+                onClick={() => {
+                  setFiltroDesde(minCambio);
+                  setFiltroHasta(maxCambio);
+                  setDiaFoco('');
+                }}
               >
                 Todos ({filas.length})
               </button>
@@ -801,9 +924,15 @@ export function TimerBoard({
                 <button
                   key={f}
                   type="button"
-                  role="tab"
-                  className={dia === f ? 'active' : undefined}
-                  onClick={() => setDia(f)}
+                  className={
+                    filtroDesde === f && filtroHasta === f
+                      ? 'active'
+                      : !filtroTodo && filtroDesde && filtroHasta && f >= filtroDesde && f <= filtroHasta
+                        ? 'in-range'
+                        : undefined
+                  }
+                  aria-pressed={filtroDesde === f && filtroHasta === f}
+                  onClick={() => toggleDia(f)}
                 >
                   {weekdayAbbrev(f)} {f.slice(8, 10)}/{f.slice(5, 7)}
                   <span className="timer-dias-n">{c}</span>
@@ -816,7 +945,7 @@ export function TimerBoard({
             <p className="muted timer-empty">
               {filas.length === 0
                 ? 'No hay renglones. Agregá una novedad si hace falta dejarla en el Excel.'
-                : 'Este día no tiene renglones.'}
+                : 'Ningún cambio en ese rango.'}
             </p>
           ) : (
             <div className="timer-scroll">
@@ -830,7 +959,7 @@ export function TimerBoard({
               </div>
               {grupos.map(([fecha, rows]) => (
                 <section key={fecha} className="timer-grupo">
-                  {dia ? null : (
+                  {filtroDesde && filtroHasta && filtroDesde === filtroHasta ? null : (
                     <h3 className="timer-grupo-titulo">
                       {weekdayLong(fecha)} {isoToDmy(fecha)}
                       <span>{rows.length}</span>
@@ -901,15 +1030,15 @@ export function TimerBoard({
                           aria-label={`Observación ${f.persona}`}
                         />
                         <div className="timer-accion">
-                          {cerrado ? null : (
+                          {!cerrado && f.origen === 'extra' ? (
                             <button
                               type="button"
                               className="btn ghost sm"
-                              onClick={() => void quitar(f.id)}
+                              onClick={() => void descartarExtra(f.id)}
                             >
-                              Quitar
+                              Descartar
                             </button>
-                          )}
+                          ) : null}
                         </div>
                       </li>
                     ))}
@@ -920,7 +1049,19 @@ export function TimerBoard({
           )}
 
           {!cerrado ? (
-          <details className="timer-add">
+          <details
+            className="timer-add"
+            open={altaAbierta}
+            onToggle={(e) => {
+              const open = e.currentTarget.open;
+              setAltaAbierta(open);
+              if (!open) {
+                setInspector('');
+                setMotivo('');
+                setNota('');
+              }
+            }}
+          >
             <summary>Agregar novedad</summary>
             <form
               className="timer-add-form"
@@ -931,13 +1072,8 @@ export function TimerBoard({
             >
             <div className="timer-add-row">
               <div className="field">
-                <label htmlFor="timer-fecha">Fecha</label>
-                <DateField
-                  id="timer-fecha"
-                  aria-label="Fecha"
-                  value={fechaAlta}
-                  onChange={setFechaAlta}
-                />
+                <span className="timer-add-label">Fecha</span>
+                <p className="timer-add-fecha">{isoToDmy(fechaNovedad)}</p>
               </div>
               <div className="field timer-add-person">
                 <label htmlFor="timer-insp">Persona</label>
@@ -970,6 +1106,9 @@ export function TimerBoard({
                   placeholder="Opcional"
                 />
               </div>
+              <button type="button" className="btn ghost sm" onClick={cerrarAlta}>
+                Cancelar
+              </button>
               <button
                 type="submit"
                 className="btn secondary sm"

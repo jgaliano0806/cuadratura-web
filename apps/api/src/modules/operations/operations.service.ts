@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import type { AlcanceSecciones } from '@plataforma/shared';
 import { DatabaseService } from '../../database/database.service';
 
 @Injectable()
@@ -39,7 +40,7 @@ export class OperationsService {
     return result.rows;
   }
 
-  async listInspectors() {
+  async listInspectors(alcance: AlcanceSecciones) {
     const result = await this.db.query(
       `SELECT id,
               legajo,
@@ -52,7 +53,9 @@ export class OperationsService {
        FROM seguridad_vial.inspector
        WHERE estado = 'ACTIVO'
          AND tipo_plantel <> 'PEAJISTA'
+         AND ($1::boolean OR coalesce(seccion, 'MOVILES') = ANY($2::varchar[]))
        ORDER BY coalesce(apellido, nombre_completo), coalesce(nombres, ''), legajo`,
+      [alcance.seccionesTodas, alcance.secciones],
     );
     return result.rows;
   }

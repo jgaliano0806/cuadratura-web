@@ -129,9 +129,14 @@ export function plantelesDe(ambito: AmbitoId) {
   return PLANTELES.filter((p) => p.ambito === ambito);
 }
 
-export function plantelPorDefecto(ambito: AmbitoId): PlantelId {
-  const lista = plantelesDe(ambito);
-  return lista.find((p) => p.ready)?.id ?? lista[0]?.id ?? 'inspectores';
+export function plantelPorDefecto(
+  ambito: AmbitoId,
+  permitidos?: readonly PlantelId[],
+): PlantelId {
+  const lista = plantelesDe(ambito).filter(
+    (p) => !permitidos || permitidos.includes(p.id),
+  );
+  return lista.find((p) => p.ready)?.id ?? lista[0]?.id ?? permitidos?.[0] ?? 'inspectores';
 }
 
 export function parseAmbito(
@@ -150,28 +155,38 @@ export function parseAmbito(
 export function parsePlantel(
   value: string | null | undefined,
   ambito?: AmbitoId,
+  permitidos?: readonly PlantelId[],
 ): PlantelId {
   const primero = (value ?? '').split(',')[0]?.trim();
   const raw = PLANTELES.find((p) => p.id === primero)?.id ?? null;
   const zona = ambito ?? (raw ? PLANTELES.find((p) => p.id === raw)!.ambito : 'sv');
-  const delAmbito = plantelesDe(zona);
+  const delAmbito = plantelesDe(zona).filter(
+    (p) => !permitidos || permitidos.includes(p.id),
+  );
   if (raw && delAmbito.some((p) => p.id === raw)) return raw;
   const listo = delAmbito.find((p) => p.ready);
-  return listo?.id ?? delAmbito[0]?.id ?? 'inspectores';
+  return listo?.id ?? delAmbito[0]?.id ?? permitidos?.[0] ?? 'inspectores';
 }
 
 export function parsePlanteles(
   value: string | null | undefined,
   ambito: AmbitoId,
+  permitidos?: readonly PlantelId[],
 ): PlantelId[] {
-  const validos = new Set(plantelesDe(ambito).map((p) => p.id));
+  const validos = new Set(
+    plantelesDe(ambito)
+      .map((p) => p.id)
+      .filter((id) => !permitidos || permitidos.includes(id)),
+  );
   const ids: PlantelId[] = [];
   for (const raw of (value ?? '').split(',')) {
     const id = raw.trim() as PlantelId;
     if (!validos.has(id) || ids.includes(id)) continue;
     ids.push(id);
   }
-  return ids.length ? ids : [plantelPorDefecto(ambito)];
+  if (ids.length) return ids;
+  const def = plantelPorDefecto(ambito, permitidos);
+  return validos.has(def) ? [def] : permitidos?.length ? [permitidos[0]] : [];
 }
 
 export function seccionesDePlanteles(ids: PlantelId[]): SeccionSv[] {
@@ -181,4 +196,26 @@ export function seccionesDePlanteles(ids: PlantelId[]): SeccionSv[] {
     if (s && !out.includes(s)) out.push(s);
   }
   return out;
+}
+
+export function plantelesDelAlcance(alcance: {
+  seccionesTodas?: boolean;
+  secciones?: string[];
+}): PlantelId[] {
+  if (alcance.seccionesTodas) return PLANTELES.map((p) => p.id);
+  const set = new Set(alcance.secciones ?? []);
+  return PLANTELES.filter((p) => {
+    const s = seccionDePlantel(p.id);
+    return s != null && set.has(s);
+  }).map((p) => p.id);
+}
+
+export function ambitosDelAlcance(alcance: {
+  seccionesTodas?: boolean;
+  secciones?: string[];
+}): AmbitoId[] {
+  const ids = new Set(
+    plantelesDelAlcance(alcance).map((id) => PLANTELES.find((p) => p.id === id)!.ambito),
+  );
+  return AMBITOS.map((a) => a.id).filter((id) => ids.has(id));
 }

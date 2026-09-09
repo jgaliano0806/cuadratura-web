@@ -515,7 +515,7 @@ export class ScheduleEngineService {
           positions: inputs.length,
         };
       },
-      { userId, changeReason: 'Proyección motor de cuadratura' },
+      { userId, changeReason: 'Generó la cuadratura Ideal' },
     );
   }
 
@@ -539,7 +539,7 @@ export class ScheduleEngineService {
           [userId, motivo],
         );
       },
-      { userId, changeReason: `Tabula rasa PLANIFICADA: ${motivo}` },
+      { userId, changeReason: `Vació la cuadratura Ideal (${motivo})` },
     );
     return {
       wiped: true,
@@ -908,7 +908,7 @@ export class ScheduleEngineService {
           cells_reset: cellsReset,
         };
       },
-      { userId, changeReason: 'Materialización REAL con overlays operativos' },
+      { userId, changeReason: 'Actualizó la cuadratura Real' },
     );
   }
 

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ROLE_CODES } from '@plataforma/shared';
+import { PERMISSION_CODES, ROLE_CODES } from '@plataforma/shared';
 import { api, ApiError } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import {
@@ -53,7 +53,7 @@ function actionLabel(t: NonNullable<PendingAction>['type']): string {
 }
 
 export function ApprovalPage() {
-  const { hasRole } = useAuth();
+  const { hasRole, hasPermission } = useAuth();
   const toast = useToast();
   const [versions, setVersions] = useState<Version[]>([]);
   const [busy, setBusy] = useState(false);
@@ -241,7 +241,8 @@ export function ApprovalPage() {
                           Comparar
                         </button>
                       ) : null}
-                      {hasRole(ROLE_CODES.ADMIN_SV) &&
+                      {(hasRole(ROLE_CODES.ADMIN_SV) ||
+                        hasPermission(PERMISSION_CODES.PLANIFICACION_ENVIAR_REVISION)) &&
                         ['BORRADOR', 'OBSERVADA'].includes(v.estado) && (
                           <button
                             className="btn sm secondary"
@@ -253,7 +254,9 @@ export function ApprovalPage() {
                             Enviar
                           </button>
                         )}
-                      {hasRole(ROLE_CODES.ADMIN_SV) && v.estado === 'OBSERVADA' && (
+                      {(hasRole(ROLE_CODES.ADMIN_SV) ||
+                        hasPermission(PERMISSION_CODES.PLANIFICACION_CREAR)) &&
+                        v.estado === 'OBSERVADA' && (
                         <button
                           className="btn sm secondary"
                           type="button"
@@ -262,7 +265,10 @@ export function ApprovalPage() {
                           Reabrir
                         </button>
                       )}
-                      {hasRole(ROLE_CODES.JEFE) && v.estado === 'EN_REVISION' && (
+                      {(hasRole(ROLE_CODES.JEFE) ||
+                        hasPermission(PERMISSION_CODES.PLANIFICACION_OBSERVAR) ||
+                        hasPermission(PERMISSION_CODES.PLANIFICACION_APROBAR_PUBLICAR)) &&
+                        v.estado === 'EN_REVISION' && (
                         <>
                           <button
                             className="btn sm secondary"
@@ -285,7 +291,8 @@ export function ApprovalPage() {
                           </button>
                         </>
                       )}
-                      {hasRole(ROLE_CODES.JEFE) &&
+                      {(hasRole(ROLE_CODES.JEFE) ||
+                        hasPermission(PERMISSION_CODES.PLANIFICACION_CERRAR)) &&
                         v.estado === 'APROBADA_PUBLICADA' && (
                           <button
                             className="btn sm"

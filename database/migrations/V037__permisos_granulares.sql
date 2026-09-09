@@ -1,0 +1,93 @@
+BEGIN;
+SET search_path TO seguridad_vial, public;
+
+INSERT INTO permiso(codigo, descripcion) VALUES
+('CUADRATURA_VER', 'Ver cuadratura, ocupación y Timer'),
+('CUADRATURA_EDITAR', 'Editar Real (códigos, enroques)'),
+('CUADRATURA_PLANIFICAR', 'Generar y aplicar Ideal'),
+('TIMER_CARGAR', 'Cargar y guardar Timer'),
+('EXCEL_EXPORTAR', 'Descargar Excel y planillas'),
+('HUECOS_VER', 'Ver huecos'),
+('HUECO_JUSTIFICAR', 'Justificar huecos'),
+('VACACIONES_VER', 'Ver vacaciones'),
+('VACACIONES_GESTIONAR', 'Cargar vacaciones'),
+('APROBACION_VER', 'Ver aprobación de versiones'),
+('PLANIFICACION_CREAR', 'Crear o reabrir borrador'),
+('PLANIFICACION_ENVIAR_REVISION', 'Enviar a revisión'),
+('PLANIFICACION_OBSERVAR', 'Observar una versión'),
+('PLANIFICACION_APROBAR_PUBLICAR', 'Aprobar y publicar'),
+('PLANIFICACION_CERRAR', 'Cerrar un período'),
+('PERSONAS_GESTIONAR', 'Personas'),
+('LICENCIAS_GESTIONAR', 'Códigos de cuadratura'),
+('MOTIVOS_GESTIONAR', 'Motivos del Timer'),
+('MOVILES_GESTIONAR', 'Móviles'),
+('POSICIONES_GESTIONAR', 'Posiciones'),
+('PERFILES_GESTIONAR', 'Perfiles de rotación'),
+('APARIENCIA_GESTIONAR', 'Apariencia'),
+('USUARIOS_ADMINISTRAR', 'Usuarios y claves'),
+('AUDITORIA_CONSULTAR', 'Consultar auditoría'),
+('INICIALIZACION_EJECUTAR', 'Inicialización técnica')
+ON CONFLICT (codigo) DO UPDATE SET descripcion = EXCLUDED.descripcion;
+
+CREATE TABLE IF NOT EXISTS usuario_permiso (
+    usuario_id uuid NOT NULL REFERENCES usuario(id) ON DELETE CASCADE,
+    permiso_id uuid NOT NULL REFERENCES permiso(id) ON DELETE CASCADE,
+    PRIMARY KEY (usuario_id, permiso_id)
+);
+
+DELETE FROM rol_permiso;
+
+INSERT INTO rol_permiso(rol_id, permiso_id)
+SELECT r.id, p.id
+FROM rol r
+JOIN permiso p ON (
+    (r.codigo = 'CONSULTA' AND p.codigo IN (
+        'CUADRATURA_VER', 'EXCEL_EXPORTAR', 'HUECOS_VER', 'VACACIONES_VER', 'APROBACION_VER'
+    )) OR
+    (r.codigo = 'AUDITOR' AND p.codigo IN (
+        'CUADRATURA_VER', 'EXCEL_EXPORTAR', 'HUECOS_VER', 'VACACIONES_VER', 'APROBACION_VER',
+        'AUDITORIA_CONSULTAR'
+    )) OR
+    (r.codigo = 'RECURSOS_HUMANOS' AND p.codigo IN (
+        'CUADRATURA_VER', 'EXCEL_EXPORTAR', 'HUECOS_VER', 'VACACIONES_VER', 'APROBACION_VER',
+        'PERSONAS_GESTIONAR', 'LICENCIAS_GESTIONAR', 'MOTIVOS_GESTIONAR',
+        'VACACIONES_GESTIONAR', 'APARIENCIA_GESTIONAR'
+    )) OR
+    (r.codigo = 'JEFE_SECTOR' AND p.codigo IN (
+        'CUADRATURA_VER', 'EXCEL_EXPORTAR', 'HUECOS_VER', 'VACACIONES_VER', 'APROBACION_VER',
+        'CUADRATURA_EDITAR', 'TIMER_CARGAR', 'HUECO_JUSTIFICAR', 'VACACIONES_GESTIONAR',
+        'PLANIFICACION_OBSERVAR', 'PLANIFICACION_APROBAR_PUBLICAR', 'PLANIFICACION_CERRAR',
+        'PERSONAS_GESTIONAR', 'LICENCIAS_GESTIONAR', 'MOTIVOS_GESTIONAR',
+        'MOVILES_GESTIONAR', 'APARIENCIA_GESTIONAR'
+    )) OR
+    (r.codigo = 'ADMINISTRACION_SEGURIDAD_VIAL' AND p.codigo IN (
+        'CUADRATURA_VER', 'EXCEL_EXPORTAR', 'HUECOS_VER', 'VACACIONES_VER', 'APROBACION_VER',
+        'CUADRATURA_EDITAR', 'CUADRATURA_PLANIFICAR', 'TIMER_CARGAR', 'HUECO_JUSTIFICAR',
+        'VACACIONES_GESTIONAR', 'PLANIFICACION_CREAR', 'PLANIFICACION_ENVIAR_REVISION',
+        'PLANIFICACION_OBSERVAR', 'PLANIFICACION_APROBAR_PUBLICAR', 'PLANIFICACION_CERRAR',
+        'PERSONAS_GESTIONAR', 'LICENCIAS_GESTIONAR', 'MOTIVOS_GESTIONAR', 'MOVILES_GESTIONAR',
+        'POSICIONES_GESTIONAR', 'PERFILES_GESTIONAR', 'APARIENCIA_GESTIONAR',
+        'USUARIOS_ADMINISTRAR'
+    )) OR
+    (r.codigo = 'ADMINISTRADOR_SISTEMA' AND p.codigo IN (
+        'CUADRATURA_VER', 'CUADRATURA_EDITAR', 'CUADRATURA_PLANIFICAR', 'TIMER_CARGAR',
+        'EXCEL_EXPORTAR', 'HUECOS_VER', 'HUECO_JUSTIFICAR', 'VACACIONES_VER',
+        'VACACIONES_GESTIONAR', 'APROBACION_VER', 'PLANIFICACION_CREAR',
+        'PLANIFICACION_ENVIAR_REVISION', 'PLANIFICACION_OBSERVAR',
+        'PLANIFICACION_APROBAR_PUBLICAR', 'PLANIFICACION_CERRAR',
+        'PERSONAS_GESTIONAR', 'LICENCIAS_GESTIONAR', 'MOTIVOS_GESTIONAR', 'MOVILES_GESTIONAR',
+        'POSICIONES_GESTIONAR', 'PERFILES_GESTIONAR', 'APARIENCIA_GESTIONAR',
+        'USUARIOS_ADMINISTRAR', 'AUDITORIA_CONSULTAR', 'INICIALIZACION_EJECUTAR'
+    ))
+);
+
+INSERT INTO usuario_permiso(usuario_id, permiso_id)
+SELECT DISTINCT ur.usuario_id, rp.permiso_id
+FROM usuario_rol ur
+JOIN rol_permiso rp ON rp.rol_id = ur.rol_id
+WHERE ur.fecha_hasta IS NULL OR ur.fecha_hasta >= current_date
+ON CONFLICT DO NOTHING;
+
+COMMENT ON TABLE usuario_permiso IS 'Permisos efectivos del usuario. El rol es el tipo (defaults).';
+
+COMMIT;

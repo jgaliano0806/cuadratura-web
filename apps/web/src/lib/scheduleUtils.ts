@@ -13,6 +13,7 @@ export type DayRow = {
   licencia_codigo?: string | null;
   licencia_color_fondo?: string | null;
   licencia_color_letra?: string | null;
+  motivo_operativo?: string | null;
 };
 
 export type CoverageRow = {
@@ -251,6 +252,29 @@ export function cellShortLabel(cell: DayRow): string {
   if (cell.tipo_dia === 'FRANCO') return 'F';
   if (cell.turno && cell.movil != null) return `${cell.turno}${cell.movil}`;
   return '';
+}
+
+export type FiltrosGrilla = {
+  inspectores: string[];
+  licencias: string[];
+  moviles: string[];
+  turnos: string[];
+};
+
+export function diaPasa(d: DayRow, f: FiltrosGrilla): boolean {
+  if (f.moviles.length && (d.movil == null || !f.moviles.includes(String(d.movil)))) {
+    return false;
+  }
+  if (f.turnos.length && (!d.turno || !f.turnos.includes(d.turno))) return false;
+  if (f.licencias.length) {
+    const codigos = new Set<string>();
+    if (d.licencia_codigo) codigos.add(d.licencia_codigo);
+    if (d.codigo) codigos.add(d.codigo);
+    const corto = cellShortLabel(d);
+    if (corto) codigos.add(corto);
+    if (![...codigos].some((c) => f.licencias.includes(c))) return false;
+  }
+  return true;
 }
 
 export function cellDetailLabel(cell: DayRow): string {

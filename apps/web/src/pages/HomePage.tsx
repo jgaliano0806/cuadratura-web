@@ -36,16 +36,14 @@ function formatToday(): string {
 }
 
 export function HomePage() {
-  const { user, hasRole } = useAuth();
+  const { user, hasRole, canAdmin } = useAuth();
   const [overview, setOverview] = useState<Overview | null>(null);
   const [versions, setVersions] = useState<Version[]>([]);
   const [busy, setBusy] = useState(true);
 
-  const isPrivileged = hasRole(
-    ROLE_CODES.ADMIN_SV,
-    ROLE_CODES.ADMIN_SYS,
-    ROLE_CODES.JEFE,
-  );
+  const isPrivileged =
+    canAdmin ||
+    hasRole(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE, ROLE_CODES.RH);
 
   useEffect(() => {
     let alive = true;

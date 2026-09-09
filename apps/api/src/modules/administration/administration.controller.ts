@@ -13,6 +13,7 @@ import {
   IsArray,
   IsBoolean,
   IsDateString,
+  IsEmail,
   IsIn,
   IsInt,
   IsOptional,
@@ -22,8 +23,11 @@ import {
   Min,
   MinLength,
 } from 'class-validator';
-import { Type } from 'class-transformer';
-import { ROLE_CODES } from '@plataforma/shared';
+import { Type, Transform } from 'class-transformer';
+import { ADMIN_PERMISSIONS, PERMISSION_CODES, ROLE_CODES, type AlcanceSecciones } from '@plataforma/shared';
+import { Permissions, Roles, RolesGuard } from '../identity/roles.guard';
+import { CurrentUser, type RequestUser } from '../identity/current-user.decorator';
+import { AdministrationService } from './administration.service';
 
 const SECCIONES_VALIDAS = [
   'MOVILES', 'EPI', 'BO',
@@ -33,9 +37,13 @@ const SECCIONES_VALIDAS = [
   'RUTA_5', 'RUTA_9_NORTE', 'RUTA_9_SUR',
   'RUTA_E53', 'RUTA_E55',
 ] as const;
-import { Roles, RolesGuard } from '../identity/roles.guard';
-import { CurrentUser, type RequestUser } from '../identity/current-user.decorator';
-import { AdministrationService } from './administration.service';
+
+function alcanceDe(user: RequestUser): AlcanceSecciones {
+  return {
+    seccionesTodas: Boolean(user.seccionesTodas),
+    secciones: user.secciones ?? [],
+  };
+}
 
 class CreateInspectorDto {
   @IsString()
@@ -247,6 +255,102 @@ class UpdateLicenciaDto {
   color_letra?: string | null;
 }
 
+class CreateUserDto {
+  @Transform(({ value }) => (value === '' || value == null ? undefined : value))
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  nombre_usuario?: string;
+
+  @IsString()
+  @MinLength(1)
+  apellido!: string;
+
+  @IsString()
+  @MinLength(1)
+  nombres!: string;
+
+  @IsEmail()
+  email!: string;
+
+  @Transform(({ value }) => (value === '' || value == null ? undefined : value))
+  @IsOptional()
+  @IsString()
+  legajo?: string;
+
+  @IsArray()
+  @IsString({ each: true })
+  roles!: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsIn(Object.values(PERMISSION_CODES), { each: true })
+  permisos?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsIn(SECCIONES_VALIDAS, { each: true })
+  secciones?: string[];
+
+  @IsOptional()
+  @IsBoolean()
+  secciones_todas?: boolean;
+
+  @IsOptional()
+  @IsIn(['ACTIVO', 'INACTIVO'])
+  estado?: 'ACTIVO' | 'INACTIVO';
+}
+
+class UpdateUserDto {
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  nombre_usuario?: string;
+
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  apellido?: string;
+
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  nombres?: string;
+
+  @Transform(({ value }) => (value === '' ? null : value))
+  @IsOptional()
+  @IsEmail()
+  email?: string | null;
+
+  @Transform(({ value }) => (value === '' ? null : value))
+  @IsOptional()
+  @IsString()
+  legajo?: string | null;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  roles?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsIn(Object.values(PERMISSION_CODES), { each: true })
+  permisos?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsIn(SECCIONES_VALIDAS, { each: true })
+  secciones?: string[];
+
+  @IsOptional()
+  @IsBoolean()
+  secciones_todas?: boolean;
+
+  @IsOptional()
+  @IsIn(['ACTIVO', 'INACTIVO'])
+  estado?: 'ACTIVO' | 'INACTIVO';
+}
+
 class CreatePositionDto {
   @IsOptional()
   @IsIn(['GENERAL', 'MOVIL4', 'MOVIL6', 'MOVIL7'])
@@ -273,7 +377,8 @@ class CreatePositionDto {
 
 @Controller('admin')
 @UseGuards(AuthGuard('jwt'), RolesGuard)
-@Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE)
+@Roles(ROLE_CODES.ADMIN_SV, ROLE_CODES.ADMIN_SYS, ROLE_CODES.JEFE, ROLE_CODES.RH)
+@Permissions(...ADMIN_PERMISSIONS)
 export class AdministrationController {
   constructor(private readonly admin: AdministrationService) {}
 
@@ -283,16 +388,19 @@ export class AdministrationController {
   }
 
   @Get('inspectors')
-  inspectors() {
-    return this.admin.inspectors();
+  @Permissions(PERMISSION_CODES.PERSONAS_GESTIONAR)
+  inspectors(@CurrentUser() user: RequestUser) {
+    return this.admin.inspectors(alcanceDe(user));
   }
 
   @Get('inspectors/:id/historial')
-  historialInspector(@Param('id') id: string) {
-    return this.admin.historialInspector(id);
+  @Permissions(PERMISSION_CODES.PERSONAS_GESTIONAR)
+  historialInspector(@Param('id') id: string, @CurrentUser() user: RequestUser) {
+    return this.admin.historialInspector(id, alcanceDe(user));
   }
 
   @Post('inspectors')
+  @Permissions(PERMISSION_CODES.PERSONAS_GESTIONAR)
   createInspector(
     @Body() body: CreateInspectorDto,
     @CurrentUser() user: RequestUser,
@@ -306,10 +414,12 @@ export class AdministrationController {
       posicionId: body.posicion_id,
       seccion: body.seccion,
       userId: user.userId,
+      alcance: alcanceDe(user),
     });
   }
 
   @Patch('inspectors/:id')
+  @Permissions(PERMISSION_CODES.PERSONAS_GESTIONAR)
   updateInspector(
     @Param('id') id: string,
     @Body() body: UpdateInspectorDto,
@@ -324,30 +434,36 @@ export class AdministrationController {
       posicionId: body.posicion_id,
       seccion: body.seccion,
       userId: user.userId,
+      alcance: alcanceDe(user),
     });
   }
 
   @Delete('inspectors/:id')
-  deactivateInspector(@Param('id') id: string) {
-    return this.admin.deactivateInspector(id);
+  @Permissions(PERMISSION_CODES.PERSONAS_GESTIONAR)
+  deactivateInspector(@Param('id') id: string, @CurrentUser() user: RequestUser) {
+    return this.admin.deactivateInspector(id, alcanceDe(user));
   }
 
   @Get('positions-assignable')
+  @Permissions(PERMISSION_CODES.PERSONAS_GESTIONAR, PERMISSION_CODES.POSICIONES_GESTIONAR)
   assignablePositions() {
     return this.admin.assignablePositions();
   }
 
   @Get('mobiles')
+  @Permissions(PERMISSION_CODES.MOVILES_GESTIONAR)
   mobiles() {
     return this.admin.mobiles();
   }
 
   @Get('bases')
+  @Permissions(PERMISSION_CODES.MOVILES_GESTIONAR)
   bases() {
     return this.admin.bases();
   }
 
   @Post('mobiles')
+  @Permissions(PERMISSION_CODES.MOVILES_GESTIONAR)
   createMobile(@Body() body: CreateMobileDto) {
     return this.admin.createMobile({
       numero: body.numero,
@@ -358,6 +474,7 @@ export class AdministrationController {
   }
 
   @Patch('mobiles/:id')
+  @Permissions(PERMISSION_CODES.MOVILES_GESTIONAR)
   updateMobile(@Param('id') id: string, @Body() body: UpdateMobileDto) {
     return this.admin.updateMobile(id, {
       baseOperativaId: body.base_operativa_id,
@@ -367,16 +484,19 @@ export class AdministrationController {
   }
 
   @Delete('mobiles/:id')
+  @Permissions(PERMISSION_CODES.MOVILES_GESTIONAR)
   deactivateMobile(@Param('id') id: string) {
     return this.admin.deactivateMobile(id);
   }
 
   @Get('positions')
+  @Permissions(PERMISSION_CODES.POSICIONES_GESTIONAR, PERMISSION_CODES.PERSONAS_GESTIONAR)
   positions() {
     return this.admin.positions();
   }
 
   @Post('positions')
+  @Permissions(PERMISSION_CODES.POSICIONES_GESTIONAR, PERMISSION_CODES.PERSONAS_GESTIONAR)
   createPosition(@Body() body: CreatePositionDto) {
     return this.admin.createPosition({
       tipo: body.tipo,
@@ -388,26 +508,86 @@ export class AdministrationController {
   }
 
   @Get('profiles')
+  @Permissions(PERMISSION_CODES.PERFILES_GESTIONAR, PERMISSION_CODES.PERSONAS_GESTIONAR)
   profiles() {
     return this.admin.profiles();
   }
 
   @Get('users')
+  @Permissions(PERMISSION_CODES.USUARIOS_ADMINISTRAR)
   users() {
     return this.admin.users();
   }
 
+  @Get('roles')
+  @Permissions(PERMISSION_CODES.USUARIOS_ADMINISTRAR)
+  roles() {
+    return this.admin.listRoles();
+  }
+
+  @Post('users')
+  @Permissions(PERMISSION_CODES.USUARIOS_ADMINISTRAR)
+  async createUser(@Body() body: CreateUserDto) {
+    const creado = await this.admin.createUser({
+      nombreUsuario: body.nombre_usuario,
+      apellido: body.apellido,
+      nombres: body.nombres,
+      email: body.email,
+      legajo: body.legajo,
+      roles: body.roles,
+      permisos: body.permisos,
+      secciones: body.secciones,
+      seccionesTodas: body.secciones_todas,
+      estado: body.estado,
+    });
+    const lista = await this.admin.users();
+    const user = lista.find((u) => u.id === creado.id) ?? { id: creado.id };
+    return { ...user, clave_inicial: creado.clave };
+  }
+
+  @Patch('users/:id/password')
+  @Permissions(PERMISSION_CODES.USUARIOS_ADMINISTRAR)
+  resetUserPassword(@Param('id') id: string) {
+    return this.admin.resetUserPassword(id);
+  }
+
+  @Patch('users/:id')
+  @Permissions(PERMISSION_CODES.USUARIOS_ADMINISTRAR)
+  updateUser(@Param('id') id: string, @Body() body: UpdateUserDto) {
+    return this.admin.updateUser(id, {
+      nombreUsuario: body.nombre_usuario,
+      apellido: body.apellido,
+      nombres: body.nombres,
+      email: body.email,
+      legajo: body.legajo,
+      roles: body.roles,
+      permisos: body.permisos,
+      secciones: body.secciones,
+      seccionesTodas: body.secciones_todas,
+      estado: body.estado,
+    });
+  }
+
+  @Delete('users/:id')
+  @Permissions(PERMISSION_CODES.USUARIOS_ADMINISTRAR)
+  deleteUser(@Param('id') id: string, @CurrentUser() user: RequestUser) {
+    return this.admin.deleteUser(id, user.userId);
+  }
+
   @Get('linked-groups')
+  @Permissions(PERMISSION_CODES.PERSONAS_GESTIONAR)
   linkedGroups() {
     return this.admin.linkedGroups();
   }
 
   @Get('licencias')
+  @Permissions(PERMISSION_CODES.LICENCIAS_GESTIONAR)
   licencias() {
     return this.admin.listLicencias();
   }
 
   @Post('licencias')
+  @Permissions(PERMISSION_CODES.LICENCIAS_GESTIONAR)
   createLicencia(@Body() body: CreateLicenciaDto) {
     return this.admin.createLicencia({
       nombre: body.nombre,
@@ -422,6 +602,7 @@ export class AdministrationController {
   }
 
   @Patch('licencias/:id')
+  @Permissions(PERMISSION_CODES.LICENCIAS_GESTIONAR)
   updateLicencia(@Param('id') id: string, @Body() body: UpdateLicenciaDto) {
     return this.admin.updateLicencia(id, {
       nombre: body.nombre,
@@ -438,16 +619,19 @@ export class AdministrationController {
   }
 
   @Delete('licencias/:id')
+  @Permissions(PERMISSION_CODES.LICENCIAS_GESTIONAR)
   deleteLicencia(@Param('id') id: string) {
     return this.admin.deleteLicencia(id);
   }
 
   @Get('timer-motivos')
+  @Permissions(PERMISSION_CODES.MOTIVOS_GESTIONAR)
   timerMotivos() {
     return this.admin.listTimerMotivos();
   }
 
   @Post('timer-motivos')
+  @Permissions(PERMISSION_CODES.MOTIVOS_GESTIONAR)
   createTimerMotivo(@Body() body: CreateTimerMotivoDto) {
     return this.admin.createTimerMotivo({
       nombre: body.nombre,
@@ -456,6 +640,7 @@ export class AdministrationController {
   }
 
   @Patch('timer-motivos/:id')
+  @Permissions(PERMISSION_CODES.MOTIVOS_GESTIONAR)
   updateTimerMotivo(@Param('id') id: string, @Body() body: UpdateTimerMotivoDto) {
     return this.admin.updateTimerMotivo(id, {
       nombre: body.nombre,
@@ -465,6 +650,7 @@ export class AdministrationController {
   }
 
   @Delete('timer-motivos/:id')
+  @Permissions(PERMISSION_CODES.MOTIVOS_GESTIONAR)
   deleteTimerMotivo(@Param('id') id: string) {
     return this.admin.deleteTimerMotivo(id);
   }

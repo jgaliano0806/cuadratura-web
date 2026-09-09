@@ -1,5 +1,5 @@
 import { BrowserRouter, Navigate, Route, Routes, useSearchParams } from 'react-router-dom';
-import { AuthProvider } from './lib/auth';
+import { AuthProvider, useAuth } from './lib/auth';
 import { ThemeProvider } from './lib/theme';
 import { BoxThemeProvider } from './lib/boxTheme';
 import { AppLayout } from './components/AppLayout';
@@ -12,6 +12,13 @@ import { Mobile4Page } from './pages/Mobile4Page';
 import { Ruta36Page } from './pages/Ruta36Page';
 import { AdministrationPage } from './pages/AdministrationPage';
 import { CuadraturaPage } from './pages/CuadraturaPage';
+
+function AdminRoute() {
+  const { canAdmin, loading } = useAuth();
+  if (loading) return null;
+  if (!canAdmin) return <Navigate to="/inspectores" replace />;
+  return <AdministrationPage />;
+}
 
 function RedirectToInspectores({ vista }: { vista: 'ideal' | 'real' }) {
   const [params] = useSearchParams();
@@ -45,7 +52,7 @@ export function App() {
                 <Route path="/aprobacion" element={<ApprovalPage />} />
                 <Route path="/movil4" element={<Mobile4Page />} />
                 <Route path="/ruta36" element={<Ruta36Page />} />
-                <Route path="/administracion" element={<AdministrationPage />} />
+                <Route path="/administracion" element={<AdminRoute />} />
               </Route>
               <Route path="*" element={<Navigate to="/inspectores" replace />} />
             </Routes>

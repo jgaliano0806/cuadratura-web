@@ -24,7 +24,9 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { PERMISSION_CODES } from '@plataforma/shared';
 import { CurrentUser, type RequestUser } from '../identity/current-user.decorator';
+import { Permissions, RolesGuard } from '../identity/roles.guard';
 import { OperationsService } from './operations.service';
 
 class TimerExtraCreateDto {
@@ -139,7 +141,7 @@ class TimerGuardadoCreateDto {
 }
 
 @Controller('operations')
-@UseGuards(AuthGuard('jwt'))
+@UseGuards(AuthGuard('jwt'), RolesGuard)
 export class OperationsController {
   constructor(private readonly operations: OperationsService) {}
 
@@ -154,8 +156,11 @@ export class OperationsController {
   }
 
   @Get('inspectors')
-  inspectors() {
-    return this.operations.listInspectors();
+  inspectors(@CurrentUser() user: RequestUser) {
+    return this.operations.listInspectors({
+      seccionesTodas: Boolean(user.seccionesTodas),
+      secciones: user.secciones ?? [],
+    });
   }
 
   @Get('licencias')
@@ -185,11 +190,13 @@ export class OperationsController {
   }
 
   @Post('timer-extras')
+  @Permissions(PERMISSION_CODES.TIMER_CARGAR)
   createTimerExtra(@Body() body: TimerExtraCreateDto, @CurrentUser() user: RequestUser) {
     return this.operations.createTimerExtra(user.userId, body);
   }
 
   @Patch('timer-extras/:id')
+  @Permissions(PERMISSION_CODES.TIMER_CARGAR)
   async patchTimerExtra(@Param('id') id: string, @Body() body: TimerExtraPatchDto) {
     const row = await this.operations.updateTimerExtra(id, body);
     if (!row) throw new NotFoundException('Novedad no encontrada.');
@@ -197,6 +204,7 @@ export class OperationsController {
   }
 
   @Delete('timer-extras/:id')
+  @Permissions(PERMISSION_CODES.TIMER_CARGAR)
   async deleteTimerExtra(@Param('id') id: string) {
     const ok = await this.operations.deleteTimerExtra(id);
     if (!ok) throw new NotFoundException('Novedad no encontrada.');
@@ -216,6 +224,7 @@ export class OperationsController {
   }
 
   @Post('timer-guardados')
+  @Permissions(PERMISSION_CODES.TIMER_CARGAR)
   createTimerGuardado(
     @Body() body: TimerGuardadoCreateDto,
     @CurrentUser() user: RequestUser,

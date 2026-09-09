@@ -48,6 +48,7 @@ export class PlanningService {
                 CASE WHEN cr.capa = 'REAL' THEN lic.color_letra END,
                 cat.color_letra
               ) AS licencia_color_letra,
+              ov.motivo AS motivo_operativo,
               it.nombre_completo AS inspector_titular,
               ia.nombre_completo AS inspector_asignado
        FROM seguridad_vial.dia_cronograma d
@@ -82,6 +83,18 @@ export class PlanningService {
          ORDER BY ao.creada_en DESC
          LIMIT 1
        ) lic ON true
+       LEFT JOIN LATERAL (
+         SELECT btrim(ao.motivo) AS motivo
+         FROM seguridad_vial.asignacion_operativa ao
+         WHERE cr.capa = 'REAL'
+           AND ao.estado = 'ACTIVA'
+           AND ao.inspector_id = resolved.inspector_id
+           AND d.fecha_operativa >= ao.fecha_desde
+           AND (ao.fecha_hasta IS NULL OR d.fecha_operativa <= ao.fecha_hasta)
+           AND btrim(coalesce(ao.motivo, '')) <> ''
+         ORDER BY ao.creada_en DESC
+         LIMIT 1
+       ) ov ON true
        LEFT JOIN LATERAL (
          SELECT cl.codigo AS licencia_codigo,
                 cl.color_fondo,

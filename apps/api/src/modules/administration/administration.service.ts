@@ -1,4 +1,22 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { randomBytes } from 'crypto';
+import * as bcrypt from 'bcryptjs';
+import {
+  ROLE_CODES,
+  PERMISSION_CODES,
+  defaultsDeTipo,
+  tipoPrincipal,
+  veSeccion,
+  type AlcanceSecciones,
+  type PermissionCode,
+  type RoleCode,
+} from '@plataforma/shared';
 import { DatabaseService } from '../../database/database.service';
 
 function isPgError(e: unknown): e is { code: string } {
@@ -31,6 +49,17 @@ function colorHex(value?: string | null, required = false): string | null {
 
 function nombreCompleto(apellido: string, nombres: string): string {
   return `${apellido.trim()}, ${nombres.trim()}`;
+}
+
+function exigirSeccion(alcance: AlcanceSecciones, seccion?: string | null) {
+  if (!veSeccion(alcance, seccion)) {
+    throw new ForbiddenException('No podés operar esa sección');
+  }
+}
+
+function claveTemporal(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  return [...randomBytes(10)].map((b) => chars[b % chars.length]).join('');
 }
 
 @Injectable()
@@ -72,7 +101,7 @@ export class AdministrationService {
     };
   }
 
-  async inspectors() {
+  async inspectors(alcance: AlcanceSecciones) {
     const result = await this.db.query(
       `SELECT i.id,
               i.legajo,
@@ -99,8 +128,9 @@ export class AdministrationService {
          ORDER BY a1.fecha_desde DESC LIMIT 1
        ) a ON true
        LEFT JOIN seguridad_vial.posicion_cuadratura p ON p.id = a.posicion_id
-       WHERE i.tipo_plantel <> 'PEAJISTA'
+       WHERE ($1::boolean OR coalesce(i.seccion, 'MOVILES') = ANY($2::varchar[]))
        ORDER BY coalesce(i.apellido, i.nombre_completo), coalesce(i.nombres, ''), i.legajo`,
+      [alcance.seccionesTodas, alcance.secciones],
     );
     return result.rows;
   }
@@ -282,24 +312,385 @@ export class AdministrationService {
   }
 
   async users() {
-    const result = await this.db.query(
+    const result = await this.db.query<{
+      id: string;
+      legajo: string | null;
+      apellido: string | null;
+      nombres: string | null;
+      nombre_mostrar: string;
+      nombre_usuario: string;
+      email: string | null;
+      estado: string;
+      secciones_todas: boolean;
+      roles: string[] | null;
+      roles_texto: string;
+      permisos: string[] | null;
+      secciones: string[] | null;
+    }>(
       `SELECT u.id,
-              u.nombre_usuario,
+              u.legajo,
+              u.apellido,
+              u.nombres,
               u.nombre_mostrar,
+              u.nombre_usuario,
+              u.email,
               u.estado,
+              u.secciones_todas,
               coalesce(
-                string_agg(r.nombre, ' · ' ORDER BY r.nombre),
+                array_agg(DISTINCT r.codigo) FILTER (WHERE r.codigo IS NOT NULL),
+                '{}'
+              ) AS roles,
+              coalesce(
+                string_agg(DISTINCT r.nombre, ' · ' ORDER BY r.nombre),
                 '—'
-              ) AS roles_texto
+              ) AS roles_texto,
+              coalesce(
+                (
+                  SELECT array_agg(p.codigo ORDER BY p.codigo)
+                  FROM seguridad_vial.usuario_permiso up
+                  JOIN seguridad_vial.permiso p ON p.id = up.permiso_id
+                  WHERE up.usuario_id = u.id
+                ),
+                '{}'
+              ) AS permisos,
+              coalesce(
+                (
+                  SELECT array_agg(s.seccion ORDER BY s.seccion)
+                  FROM seguridad_vial.usuario_seccion s
+                  WHERE s.usuario_id = u.id
+                ),
+                '{}'
+              ) AS secciones
        FROM seguridad_vial.usuario u
        LEFT JOIN seguridad_vial.usuario_rol ur
          ON ur.usuario_id = u.id
         AND (ur.fecha_hasta IS NULL OR ur.fecha_hasta >= current_date)
        LEFT JOIN seguridad_vial.rol r ON r.id = ur.rol_id
        GROUP BY u.id
-       ORDER BY u.nombre_mostrar, u.nombre_usuario`,
+       ORDER BY coalesce(u.apellido, u.nombre_mostrar), coalesce(u.nombres, ''), u.nombre_usuario`,
     );
-    return result.rows;
+    return result.rows.map((row) => ({
+      ...row,
+      roles: row.roles ?? [],
+      permisos: row.permisos ?? [],
+      secciones: row.secciones ?? [],
+    }));
+  }
+
+  async listRoles() {
+    const result = await this.db.query<{
+      codigo: string;
+      nombre: string;
+      descripcion: string | null;
+      permisos: string[] | null;
+    }>(
+      `SELECT r.codigo,
+              r.nombre,
+              r.descripcion,
+              coalesce(
+                array_agg(p.codigo) FILTER (WHERE p.codigo IS NOT NULL),
+                '{}'
+              ) AS permisos
+       FROM seguridad_vial.rol r
+       LEFT JOIN seguridad_vial.rol_permiso rp ON rp.rol_id = r.id
+       LEFT JOIN seguridad_vial.permiso p ON p.id = rp.permiso_id
+       WHERE r.codigo IN (
+         'ADMINISTRADOR_SISTEMA',
+         'JEFE_SECTOR',
+         'RECURSOS_HUMANOS',
+         'AUDITOR',
+         'CONSULTA'
+       )
+       GROUP BY r.id
+       ORDER BY CASE r.codigo
+         WHEN 'ADMINISTRADOR_SISTEMA' THEN 1
+         WHEN 'JEFE_SECTOR' THEN 2
+         WHEN 'RECURSOS_HUMANOS' THEN 3
+         WHEN 'AUDITOR' THEN 4
+         WHEN 'CONSULTA' THEN 5
+         ELSE 9
+       END, r.nombre`,
+    );
+    return result.rows.map((row) => ({
+      ...row,
+      permisos: row.permisos?.length ? row.permisos : defaultsDeTipo(row.codigo),
+    }));
+  }
+
+  async createUser(input: {
+    nombreUsuario?: string;
+    apellido: string;
+    nombres: string;
+    email?: string;
+    legajo?: string;
+    roles: string[];
+    permisos?: string[];
+    secciones?: string[];
+    seccionesTodas?: boolean;
+    estado?: 'ACTIVO' | 'INACTIVO';
+  }) {
+    const email = this.emailOpcional(input.email);
+    const username = (input.nombreUsuario?.trim() || email || '').trim();
+    const apellido = input.apellido.trim();
+    const nombres = input.nombres.trim();
+    if (!email) {
+      throw new BadRequestException('El email es obligatorio: con eso se ingresa');
+    }
+    if (!username || !apellido || !nombres) {
+      throw new BadRequestException('Apellido y nombre son obligatorios');
+    }
+    const password = claveTemporal();
+    const roles = this.rolesValidos(input.roles);
+    const permisos = this.permisosEfectivos(roles, input.permisos);
+    const hash = await bcrypt.hash(password, 10);
+    const mostrar = nombreCompleto(apellido, nombres);
+    try {
+      return await this.db.withClient(async (c) => {
+        const created = await c.query<{ id: string }>(
+          `INSERT INTO usuario (
+             nombre_usuario, nombre_mostrar, email, hash_clave, estado,
+             legajo, apellido, nombres, secciones_todas
+           ) VALUES ($1, $2, $3, $4, $5::estado_registro, $6, $7, $8, $9)
+           RETURNING id`,
+          [
+            username,
+            mostrar,
+            email,
+            hash,
+            input.estado === 'INACTIVO' ? 'INACTIVO' : 'ACTIVO',
+            this.textoOpcional(input.legajo),
+            apellido,
+            nombres,
+            Boolean(input.seccionesTodas),
+          ],
+        );
+        const id = created.rows[0].id;
+        await this.escribirRoles(c, id, roles);
+        await this.escribirPermisos(c, id, permisos);
+        await this.escribirSecciones(c, id, Boolean(input.seccionesTodas), input.secciones);
+        return { id, clave: password };
+      });
+    } catch (e) {
+      this.lanzarConflictoUsuario(e);
+      throw e;
+    }
+  }
+
+  async updateUser(
+    id: string,
+    input: {
+      nombreUsuario?: string;
+      apellido?: string;
+      nombres?: string;
+      email?: string | null;
+      legajo?: string | null;
+      roles?: string[];
+      permisos?: string[];
+      secciones?: string[];
+      seccionesTodas?: boolean;
+      estado?: 'ACTIVO' | 'INACTIVO';
+    },
+  ) {
+    const current = await this.db.query<{ id: string }>(
+      `SELECT id FROM seguridad_vial.usuario WHERE id = $1`,
+      [id],
+    );
+    if (!current.rows[0]) throw new NotFoundException('Usuario no encontrado');
+    const roles = input.roles ? this.rolesValidos(input.roles) : null;
+    try {
+      await this.db.withClient(async (c) => {
+        await c.query(
+          `UPDATE usuario
+           SET nombre_usuario = coalesce($2, nombre_usuario),
+               apellido = coalesce($3, apellido),
+               nombres = coalesce($4, nombres),
+               nombre_mostrar = CASE
+                 WHEN $3 IS NOT NULL OR $4 IS NOT NULL THEN
+                   trim(both ' ' FROM coalesce($3, apellido) || ', ' || coalesce($4, nombres))
+                 ELSE nombre_mostrar
+               END,
+               email = CASE WHEN $5::boolean THEN $6 ELSE email END,
+               legajo = CASE WHEN $7::boolean THEN $8 ELSE legajo END,
+               estado = coalesce($9::estado_registro, estado),
+               secciones_todas = coalesce($10, secciones_todas),
+               actualizado_en = now()
+           WHERE id = $1`,
+          [
+            id,
+            input.nombreUsuario?.trim() || null,
+            input.apellido?.trim() || null,
+            input.nombres?.trim() || null,
+            input.email !== undefined,
+            input.email === undefined ? null : this.emailOpcional(input.email),
+            input.legajo !== undefined,
+            input.legajo === undefined ? null : this.textoOpcional(input.legajo),
+            input.estado ?? null,
+            input.seccionesTodas ?? null,
+          ],
+        );
+        if (roles) await this.escribirRoles(c, id, roles);
+        if (input.permisos) {
+          await this.escribirPermisos(c, id, this.permisosValidos(input.permisos));
+        } else if (roles) {
+          await this.escribirPermisos(c, id, this.permisosEfectivos(roles));
+        }
+        if (input.seccionesTodas !== undefined || input.secciones) {
+          await this.escribirSecciones(c, id, Boolean(input.seccionesTodas), input.secciones);
+        }
+      });
+    } catch (e) {
+      this.lanzarConflictoUsuario(e);
+      throw e;
+    }
+    return { ok: true };
+  }
+
+  async resetUserPassword(id: string) {
+    const current = await this.db.query<{ id: string }>(
+      `SELECT id FROM seguridad_vial.usuario WHERE id = $1`,
+      [id],
+    );
+    if (!current.rows[0]) throw new NotFoundException('Usuario no encontrado');
+    const password = claveTemporal();
+    const hash = await bcrypt.hash(password, 10);
+    await this.db.query(
+      `UPDATE seguridad_vial.usuario
+       SET hash_clave = $2, actualizado_en = now()
+       WHERE id = $1`,
+      [id, hash],
+    );
+    return { clave: password };
+  }
+
+  async deleteUser(id: string, actorId: string) {
+    if (id === actorId) {
+      throw new ForbiddenException('No podés borrar tu propio usuario');
+    }
+    const current = await this.db.query<{ id: string }>(
+      `SELECT id FROM seguridad_vial.usuario WHERE id = $1`,
+      [id],
+    );
+    if (!current.rows[0]) throw new NotFoundException('Usuario no encontrado');
+    const usado = await this.db.query(
+      `SELECT 1 WHERE EXISTS (
+         SELECT 1 FROM seguridad_vial.timer_guardado WHERE guardado_por = $1
+         UNION ALL
+         SELECT 1 FROM seguridad_vial.timer_extra WHERE creado_por = $1
+       )`,
+      [id],
+    );
+    if (usado.rows[0]) {
+      throw new ConflictException(
+        'Ese usuario ya firmó un Timer. Ponelo Inactivo en Modificar.',
+      );
+    }
+    try {
+      await this.db.withClient(async (c) => {
+        await c.query(`DELETE FROM usuario_rol WHERE usuario_id = $1`, [id]);
+        await c.query(`DELETE FROM usuario_seccion WHERE usuario_id = $1`, [id]);
+        await c.query(`DELETE FROM usuario WHERE id = $1`, [id]);
+      });
+    } catch (e) {
+      if (isPgError(e) && e.code === '23503') {
+        throw new ConflictException(
+          'Ese usuario tiene movimientos en el sistema. Desactivalo en lugar de borrarlo.',
+        );
+      }
+      throw e;
+    }
+    return { ok: true };
+  }
+
+  private permisosValidos(permisos: string[]): PermissionCode[] {
+    const allowed = new Set<string>(Object.values(PERMISSION_CODES));
+    const out = [...new Set(permisos.map((p) => p.trim()).filter(Boolean))];
+    if (!out.length) throw new BadRequestException('Asigná al menos un permiso');
+    for (const p of out) {
+      if (!allowed.has(p)) throw new BadRequestException(`Permiso no válido: ${p}`);
+    }
+    return out as PermissionCode[];
+  }
+
+  private permisosEfectivos(roles: string[], permisos?: string[]): PermissionCode[] {
+    if (permisos?.length) return this.permisosValidos(permisos);
+    return defaultsDeTipo(tipoPrincipal(roles));
+  }
+
+  private async escribirPermisos(
+    c: { query: (sql: string, params?: unknown[]) => Promise<unknown> },
+    userId: string,
+    permisos: string[],
+  ) {
+    await c.query(`DELETE FROM usuario_permiso WHERE usuario_id = $1`, [userId]);
+    await c.query(
+      `INSERT INTO usuario_permiso (usuario_id, permiso_id)
+       SELECT $1, p.id
+       FROM permiso p
+       WHERE p.codigo = ANY($2::varchar[])`,
+      [userId, permisos],
+    );
+  }
+
+  private rolesValidos(roles: string[]): RoleCode[] {
+    const allowed = new Set<string>(Object.values(ROLE_CODES));
+    const out = [...new Set(roles.map((r) => r.trim()).filter(Boolean))];
+    if (!out.length) throw new BadRequestException('Asigná al menos un rol');
+    for (const r of out) {
+      if (!allowed.has(r)) throw new BadRequestException(`Rol no válido: ${r}`);
+    }
+    return out as RoleCode[];
+  }
+
+  private emailOpcional(value?: string | null): string | null {
+    const t = value?.trim() ?? '';
+    return t || null;
+  }
+
+  private textoOpcional(value?: string | null): string | null {
+    const t = value?.trim() ?? '';
+    return t || null;
+  }
+
+  private async escribirRoles(
+    c: { query: (sql: string, params?: unknown[]) => Promise<unknown> },
+    userId: string,
+    roles: string[],
+  ) {
+    await c.query(`DELETE FROM usuario_rol WHERE usuario_id = $1`, [userId]);
+    await c.query(
+      `INSERT INTO usuario_rol (usuario_id, rol_id, fecha_desde)
+       SELECT $1, r.id, current_date
+       FROM rol r
+       WHERE r.codigo = ANY($2::varchar[])`,
+      [userId, roles],
+    );
+  }
+
+  private async escribirSecciones(
+    c: { query: (sql: string, params?: unknown[]) => Promise<unknown> },
+    userId: string,
+    todas: boolean,
+    secciones?: string[],
+  ) {
+    await c.query(`DELETE FROM usuario_seccion WHERE usuario_id = $1`, [userId]);
+    if (todas) return;
+    const lista = [...new Set((secciones ?? []).map((s) => s.trim()).filter(Boolean))];
+    if (!lista.length) return;
+    await c.query(
+      `INSERT INTO usuario_seccion (usuario_id, seccion)
+       SELECT $1, x FROM unnest($2::varchar[]) AS x`,
+      [userId, lista],
+    );
+  }
+
+  private lanzarConflictoUsuario(e: unknown): void {
+    if (!isPgError(e)) return;
+    if (e.code === '23505') {
+      throw new ConflictException('Ya existe un usuario con ese nombre, email o legajo');
+    }
+    if (e.code === '23514') {
+      throw new BadRequestException('Sección no válida');
+    }
   }
 
   async linkedGroups() {
@@ -337,6 +728,7 @@ export class AdministrationService {
     posicionId?: string;
     seccion?: string;
     userId?: string;
+    alcance: AlcanceSecciones;
   }) {
     const nombres = input.nombres.trim();
     const apellido = input.apellido.trim();
@@ -346,6 +738,7 @@ export class AdministrationService {
     }
     const plantel = input.tipoPlantel ?? 'TITULAR';
     const seccion = input.seccion ?? 'MOVILES';
+    exigirSeccion(input.alcance, seccion);
     const fechaAlta = input.fechaDesde ?? null;
     try {
       const result = await this.db.query(
@@ -391,6 +784,7 @@ export class AdministrationService {
       fechaDesde?: string;
       seccion?: string;
       userId?: string;
+      alcance: AlcanceSecciones;
     },
   ) {
     const current = await this.db.query<{
@@ -403,6 +797,8 @@ export class AdministrationService {
       [id],
     );
     if (!current.rows[0]) throw new NotFoundException('Inspector no encontrado');
+    exigirSeccion(input.alcance, current.rows[0].seccion);
+    if (input.seccion) exigirSeccion(input.alcance, input.seccion);
 
     const nombres = input.nombres?.trim();
     const apellido = input.apellido?.trim();
@@ -463,12 +859,13 @@ export class AdministrationService {
     }
   }
 
-  async deactivateInspector(id: string, fechaBaja?: string) {
-    const current = await this.db.query(
-      `SELECT id FROM seguridad_vial.inspector WHERE id = $1`,
+  async deactivateInspector(id: string, alcance: AlcanceSecciones, fechaBaja?: string) {
+    const current = await this.db.query<{ id: string; seccion: string | null }>(
+      `SELECT id, seccion FROM seguridad_vial.inspector WHERE id = $1`,
       [id],
     );
     if (!current.rows[0]) throw new NotFoundException('Inspector no encontrado');
+    exigirSeccion(alcance, current.rows[0].seccion);
     const baja = fechaBaja ?? new Date().toISOString().slice(0, 10);
     await this.cerrarPosicionVigente(id, baja);
     await this.db.query(
@@ -788,13 +1185,14 @@ export class AdministrationService {
     return row.rows[0];
   }
 
-  async historialInspector(id: string) {
+  async historialInspector(id: string, alcance: AlcanceSecciones) {
     const head = await this.db.query(
       `SELECT id, legajo, nombres, apellido, nombre_completo, seccion, estado
        FROM seguridad_vial.inspector WHERE id = $1`,
       [id],
     );
     if (!head.rows[0]) throw new NotFoundException('Inspector no encontrado');
+    exigirSeccion(alcance, head.rows[0].seccion);
     const filas = await this.db.query<{
       origen: string;
       seccion: string;

@@ -1,8 +1,18 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode, type UIEvent } from 'react';
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { api, ApiError } from '../../lib/api';
 import { bajarExcelPost } from '../../lib/xlsxDownload';
-import { EmptyState, ExcelMenu, SkeletonTable, useToast } from '../ui';
+import { EmptyState, ExcelMenu, FilterPicker, SkeletonTable, useToast, type Person } from '../ui';
 import { useBoxTheme } from '../../lib/boxTheme';
+import type { Licencia } from './LicenciasModal';
+import { apellidoYNombre } from '../../lib/personLabel';
+import {
+  cellShortLabel,
+  diaPasa,
+  eachDate,
+  type BoardResponse,
+  type DayRow,
+  type FiltrosGrilla,
+} from '../../lib/scheduleUtils';
 
 type EstadoOcupacion = 'HUECO' | 'CUBIERTA' | 'DOBLE' | 'SUPERPUESTA';
 
@@ -14,6 +24,7 @@ type Slot = {
   cantidad: number;
   inspectores: string[];
   estado: EstadoOcupacion;
+  fueraFiltro: boolean;
 };
 
 type Desdoble = {
@@ -43,7 +54,6 @@ type Ocupacion = {
   referencia: string;
 };
 
-const MOVILES = [1, 2, 3, 4, 5];
 const TURNOS: Array<{ code: 'M' | 'T' | 'N'; label: string }> = [
   { code: 'M', label: 'Mañana' },
   { code: 'T', label: 'Tarde' },
@@ -72,7 +82,181 @@ type Props = {
   to: string;
   enabled?: boolean;
   parte?: 'ocupacion' | 'desdobles' | 'todo';
+  filtros?: FiltrosGrilla;
+  board?: BoardResponse | null;
+  people?: Person[];
+  catalogo?: Set<string>;
+  moviles?: number[];
+  licencias?: Licencia[];
+  esIdeal?: boolean;
 };
+
+const FILTROS_VACIOS: FiltrosGrilla = {
+  inspectores: [],
+  licencias: [],
+  moviles: [],
+  turnos: [],
+};
+
+function esTrabajo(d: DayRow): boolean {
+  if (d.movil == null || !d.turno) return false;
+  const t = (d.tipo_dia || '').toUpperCase();
+  if (t === 'FRANCO' || t === 'VACACION' || t === 'ENFERMEDAD') return false;
+  const c = (d.codigo || '').toUpperCase();
+  if (c === 'F' || c === 'V' || c === 'EF') return false;
+  return true;
+}
+
+function esFranco(d: DayRow): boolean {
+  const corto = cellShortLabel(d).toUpperCase();
+  return corto === 'F' || (d.tipo_dia || '').toUpperCase() === 'FRANCO';
+}
+
+function esVacacion(d: DayRow): boolean {
+  const corto = cellShortLabel(d).toUpperCase();
+  return corto === 'V' || (d.tipo_dia || '').toUpperCase() === 'VACACION';
+}
+
+function diaTieneCodigo(d: DayRow, codigo: string): boolean {
+  const c = codigo.toUpperCase();
+  if (c === 'F' || c === 'FRANCO') return esFranco(d);
+  if (c === 'V' || c === 'VACACION') return esVacacion(d);
+  const set = new Set<string>();
+  if (d.licencia_codigo) set.add(d.licencia_codigo.toUpperCase());
+  if (d.codigo) set.add(d.codigo.toUpperCase());
+  return set.has(c);
+}
+
+function movilesBase(
+  catalogo: number[],
+  board: BoardResponse | null,
+  data: Ocupacion | null,
+): number[] {
+  const set = new Set<number>(catalogo);
+  for (const d of board?.days ?? []) {
+    if (d.movil != null) set.add(d.movil);
+  }
+  for (const s of data?.slots ?? []) set.add(s.movil);
+  if (!set.size) return [1, 2, 3, 4, 5];
+  return [...set].sort((a, b) => a - b);
+}
+
+function estadoDeCantidad(n: number): EstadoOcupacion {
+  if (n === 0) return 'HUECO';
+  if (n === 1) return 'CUBIERTA';
+  if (n <= 2) return 'DOBLE';
+  return 'SUPERPUESTA';
+}
+
+function nombresPersona(p: Person | DayRow): string[] {
+  const out: string[] = [];
+  const apeNom = apellidoYNombre(p).trim();
+  if (apeNom) out.push(apeNom);
+  if ('nombre_completo' in p && p.nombre_completo) out.push(p.nombre_completo.trim());
+  if ('inspector' in p && p.inspector) out.push(String(p.inspector).trim());
+  return out.filter(Boolean);
+}
+
+function slotsDesdeBoard(
+  board: BoardResponse,
+  from: string,
+  to: string,
+  filtros: FiltrosGrilla,
+  catalogo: Set<string> | undefined,
+  moviles: number[],
+  turnos: Array<'M' | 'T' | 'N'>,
+): Slot[] {
+  const porSlot = new Map<string, string[]>();
+  const bruto = new Map<string, number>();
+  const hayCruza = Boolean(filtros.inspectores.length || filtros.licencias.length);
+  for (const d of board.days) {
+    if (d.fecha_operativa < from || d.fecha_operativa > to) continue;
+    if (!d.inspector_id) continue;
+    if (catalogo && !catalogo.has(d.inspector_id)) continue;
+    if (!esTrabajo(d)) continue;
+    const turno = d.turno as 'M' | 'T' | 'N';
+    if (!turnos.includes(turno) || d.movil == null || !moviles.includes(d.movil)) continue;
+    const clave = `${d.fecha_operativa}|${d.movil}|${turno}`;
+    bruto.set(clave, (bruto.get(clave) ?? 0) + 1);
+    if (filtros.inspectores.length && !filtros.inspectores.includes(d.inspector_id)) {
+      continue;
+    }
+    if (!diaPasa(d, filtros)) continue;
+    const lista = porSlot.get(clave) ?? [];
+    const nom = apellidoYNombre(d) || d.inspector || '';
+    if (nom) lista.push(nom);
+    porSlot.set(clave, lista);
+  }
+  const fechas = eachDate(from, to);
+  const salida: Slot[] = [];
+  for (const date of fechas) {
+    for (const movil of moviles) {
+      for (const turno of turnos) {
+        const inspectores = [...new Set(porSlot.get(`${date}|${movil}|${turno}`) ?? [])].sort();
+        const cantidad = inspectores.length;
+        salida.push({
+          date,
+          movil,
+          turno,
+          franja: null,
+          cantidad,
+          inspectores,
+          estado: estadoDeCantidad(cantidad),
+          fueraFiltro: hayCruza && cantidad === 0 && (bruto.get(`${date}|${movil}|${turno}`) ?? 0) > 0,
+        });
+      }
+    }
+  }
+  return salida;
+}
+
+function totalesDe(slots: Slot[]) {
+  const vivos = slots.filter((s) => !s.fueraFiltro);
+  return {
+    slots: vivos.length,
+    huecos: vivos.filter((s) => s.estado === 'HUECO').length,
+    cubiertas: vivos.filter((s) => s.estado === 'CUBIERTA').length,
+    dobles: vivos.filter((s) => s.estado === 'DOBLE').length,
+    superpuestas: vivos.filter((s) => s.estado === 'SUPERPUESTA').length,
+    desdobles_aplicados: 0,
+  };
+}
+
+function desdoblePasa(
+  d: Desdoble,
+  filtros: FiltrosGrilla,
+  nombres: Set<string> | null,
+  board: BoardResponse | null,
+): boolean {
+  if (filtros.moviles.length) {
+    const origen = String(d.movilOrigen);
+    const destino = d.movilDestino != null ? String(d.movilDestino) : '';
+    if (!filtros.moviles.includes(origen) && !filtros.moviles.includes(destino)) {
+      return false;
+    }
+  }
+  if (filtros.turnos.length && !filtros.turnos.includes(d.turno)) return false;
+  if (nombres) {
+    const involucrados = [...d.inspectores, d.movido].filter(Boolean) as string[];
+    if (!involucrados.some((n) => nombres.has(n))) return false;
+  }
+  if (filtros.licencias.length && board) {
+    const ids = new Set(
+      board.days
+        .filter(
+          (x) =>
+            x.fecha_operativa === d.date &&
+            x.turno === d.turno &&
+            (x.movil === d.movilOrigen || x.movil === d.movilDestino) &&
+            diaPasa(x, { ...filtros, inspectores: [], moviles: [], turnos: [] }),
+        )
+        .map((x) => apellidoYNombre(x) || x.inspector || '')
+        .filter(Boolean),
+    );
+    if (![...d.inspectores].some((n) => ids.has(n))) return false;
+  }
+  return true;
+}
 
 type OcPack = {
   data: Ocupacion | null;
@@ -156,7 +340,19 @@ export function OcupacionPackProvider({
   return <OcPackContext.Provider value={pack}>{children}</OcPackContext.Provider>;
 }
 
-export function OcupacionBoard({ from, to, enabled = true, parte = 'todo' }: Props) {
+export function OcupacionBoard({
+  from,
+  to,
+  enabled = true,
+  parte = 'todo',
+  filtros = FILTROS_VACIOS,
+  board = null,
+  people = [],
+  catalogo,
+  moviles: movilesCat = [],
+  licencias = [],
+  esIdeal = false,
+}: Props) {
   const shared = useContext(OcPackContext);
   const local = useOcupacionFetch(from, to, enabled && !shared);
   const { data, desdobles, busy } = shared ?? local;
@@ -169,40 +365,161 @@ export function OcupacionBoard({ from, to, enabled = true, parte = 'todo' }: Pro
   const [verResueltos, setVerResueltos] = useState(false);
   const [exportBusy, setExportBusy] = useState<'ocupacion' | 'desdobles' | null>(null);
 
+  const [extrasConteo, setExtrasConteo] = useState<string[]>([]);
   const [desplegado, setDesplegado] = useState(false);
-  const labelsRef = useRef<HTMLDivElement>(null);
-  const datesRef = useRef<HTMLDivElement>(null);
-  const syncingY = useRef(false);
 
-  function syncScrollY(origen: 'labels' | 'dates', e: UIEvent<HTMLDivElement>) {
-    if (syncingY.current) return;
-    const dst = origen === 'labels' ? datesRef.current : labelsRef.current;
-    if (!dst) return;
-    syncingY.current = true;
-    dst.scrollTop = e.currentTarget.scrollTop;
-    requestAnimationFrame(() => {
-      syncingY.current = false;
-    });
-  }
+  const movilesVista = useMemo(() => {
+    const base = movilesBase(movilesCat, board, data);
+    return filtros.moviles.length
+      ? base.filter((m) => filtros.moviles.includes(String(m)))
+      : base;
+  }, [movilesCat, board, data, filtros.moviles]);
+  const turnosVista = useMemo(
+    () =>
+      filtros.turnos.length
+        ? TURNOS.filter((t) => filtros.turnos.includes(t.code))
+        : TURNOS,
+    [filtros.turnos],
+  );
+  const nombresFiltro = useMemo(() => {
+    if (!filtros.inspectores.length) return null;
+    const set = new Set<string>();
+    for (const p of people) {
+      if (!filtros.inspectores.includes(p.id)) continue;
+      for (const n of nombresPersona(p)) set.add(n);
+    }
+    for (const d of board?.days ?? []) {
+      if (!d.inspector_id || !filtros.inspectores.includes(d.inspector_id)) continue;
+      for (const n of nombresPersona(d)) set.add(n);
+    }
+    return set;
+  }, [filtros.inspectores, people, board]);
+
+  const slotsVista = useMemo(() => {
+    const turnos = turnosVista.map((t) => t.code);
+    if (board?.days?.length) {
+      return slotsDesdeBoard(board, from, to, filtros, catalogo, movilesVista, turnos);
+    }
+    return (data?.slots ?? []).map((s) => {
+      if (!movilesVista.includes(s.movil) || !turnos.includes(s.turno)) {
+        return { ...s, fueraFiltro: true };
+      }
+      const coincide = !nombresFiltro || !s.inspectores.length || s.inspectores.some((n) => nombresFiltro.has(n));
+      const hayCruza = Boolean(filtros.inspectores.length || filtros.licencias.length);
+      return {
+        ...s,
+        fueraFiltro: hayCruza && !coincide && s.inspectores.length > 0,
+      };
+    }).filter((s) => movilesVista.includes(s.movil) && turnos.includes(s.turno));
+  }, [board, from, to, filtros, catalogo, movilesVista, turnosVista, data, nombresFiltro]);
 
   const fechas = useMemo(() => {
+    if (board?.days?.length && from && to) return eachDate(from, to);
     if (!data) return [];
-    return [...new Set(data.slots.map((s) => s.date))].sort();
-  }, [data]);
+    return [...new Set(slotsVista.map((s) => s.date))].sort();
+  }, [board, data, from, to, slotsVista]);
+
+  const sitPorDia = useMemo(() => {
+    const map = new Map<string, { v: number; f: number; extra: Record<string, number> }>();
+    for (const f of fechas) {
+      const extra: Record<string, number> = {};
+      for (const c of extrasConteo) extra[c.toUpperCase()] = 0;
+      map.set(f, { v: 0, f: 0, extra });
+    }
+    if (!board?.days?.length) return map;
+    for (const d of board.days) {
+      const f = d.fecha_operativa.slice(0, 10);
+      const row = map.get(f);
+      if (!row) continue;
+      if (!d.inspector_id) continue;
+      if (catalogo && !catalogo.has(d.inspector_id)) continue;
+      if (filtros.inspectores.length && !filtros.inspectores.includes(d.inspector_id)) {
+        continue;
+      }
+      if (esVacacion(d)) row.v += 1;
+      if (esFranco(d)) row.f += 1;
+      for (const c of extrasConteo) {
+        const k = c.toUpperCase();
+        if (diaTieneCodigo(d, c)) row.extra[k] = (row.extra[k] ?? 0) + 1;
+      }
+    }
+    return map;
+  }, [board, fechas, catalogo, filtros.inspectores, extrasConteo]);
+
+  const hayFiltroCruza = Boolean(filtros.inspectores.length || filtros.licencias.length);
+  const totalesVista = useMemo(() => totalesDe(slotsVista), [slotsVista]);
+
+  const opcionesExtra = useMemo(
+    () =>
+      licencias
+        .filter((l) => {
+          const c = (l.codigo || '').toUpperCase();
+          return c && c !== 'V' && c !== 'F';
+        })
+        .map((l) => ({
+          id: l.codigo,
+          label: `${l.codigo} · ${l.nombre}`,
+          search: `${l.codigo} ${l.nombre}`,
+        })),
+    [licencias],
+  );
+
+  const filasSit = useMemo(() => {
+    const base: Array<{
+      id: string;
+      label: string;
+      cls: string;
+      bg?: string;
+      fg?: string;
+      n: (f: string) => number;
+    }> = [];
+    if (!esIdeal) {
+      base.push({
+        id: 'V',
+        label: 'Vacaciones',
+        cls: 'sap-cell-vacacion',
+        n: (f) => sitPorDia.get(f)?.v ?? 0,
+      });
+    }
+    base.push({
+      id: 'F',
+      label: 'Franco',
+      cls: 'sap-cell-franco',
+      n: (f) => sitPorDia.get(f)?.f ?? 0,
+    });
+    for (const c of extrasConteo) {
+      const lic = licencias.find((l) => l.codigo.toUpperCase() === c.toUpperCase());
+      const k = c.toUpperCase();
+      base.push({
+        id: c,
+        label: lic?.nombre || c,
+        cls: k === 'EF' ? 'sap-cell-enfermedad' : 'sap-cell-neutral',
+        bg: lic?.color_fondo || undefined,
+        fg: lic?.color_letra || undefined,
+        n: (f) => sitPorDia.get(f)?.extra[k] ?? 0,
+      });
+    }
+    return base;
+  }, [sitPorDia, extrasConteo, licencias, esIdeal]);
+
+  const desdoblesVista = useMemo(
+    () => desdobles.filter((d) => desdoblePasa(d, filtros, nombresFiltro, board)),
+    [desdobles, filtros, nombresFiltro, board],
+  );
 
   const porClave = useMemo(() => {
     const map = new Map<string, Slot>();
-    for (const s of data?.slots ?? []) {
+    for (const s of slotsVista) {
       map.set(`${s.date}|${s.movil}|${s.turno}`, s);
     }
     return map;
-  }, [data]);
+  }, [slotsVista]);
 
   const pendientes = useMemo(
-    () => desdobles.filter((d) => d.estado === 'SIN_DESTINO'),
-    [desdobles],
+    () => desdoblesVista.filter((d) => d.estado === 'SIN_DESTINO'),
+    [desdoblesVista],
   );
-  const lista = verResueltos ? desdobles : pendientes;
+  const lista = verResueltos ? desdoblesVista : pendientes;
   const totalPages = Math.max(1, Math.ceil(lista.length / pageSize));
   const pageSafe = Math.min(page, totalPages - 1);
   const desdoblesPagina = useMemo(() => {
@@ -219,18 +536,30 @@ export function OcupacionBoard({ from, to, enabled = true, parte = 'todo' }: Pro
   }, [from, to, pendientes.length]);
 
   async function exportarOcupacion() {
-    if (!data) return;
+    if (!fechas.length) return;
     setExportBusy('ocupacion');
     try {
       const header = ['Móvil', 'Turno', ...fechas.map(fechaCorta)];
-      const grid = MOVILES.flatMap((movil) =>
-        TURNOS.map((turno) => [
-          movil,
-          turno.label,
-          ...fechas.map((f) => porClave.get(`${f}|${movil}|${turno.code}`)?.cantidad ?? 0),
-        ]),
-      );
-      const detalle = (data.slots ?? []).map((s) => [
+      const grid = [
+        ...movilesVista.flatMap((movil) =>
+          turnosVista.map((turno) => [
+            movil,
+            turno.label,
+            ...fechas.map((f) => porClave.get(`${f}|${movil}|${turno.code}`)?.cantidad ?? 0),
+          ]),
+        ),
+        ...(esIdeal ? [] : [['', 'Vacaciones', ...fechas.map((f) => sitPorDia.get(f)?.v ?? 0)]]),
+        ['', 'Franco', ...fechas.map((f) => sitPorDia.get(f)?.f ?? 0)],
+        ...extrasConteo.map((c) => {
+          const lic = licencias.find((l) => l.codigo.toUpperCase() === c.toUpperCase());
+          return [
+            '',
+            lic?.nombre || c,
+            ...fechas.map((f) => sitPorDia.get(f)?.extra[c.toUpperCase()] ?? 0),
+          ];
+        }),
+      ];
+      const detalle = slotsVista.map((s) => [
         fechaCorta(s.date),
         s.movil,
         TURNOS.find((t) => t.code === s.turno)?.label ?? s.turno,
@@ -241,7 +570,7 @@ export function OcupacionBoard({ from, to, enabled = true, parte = 'todo' }: Pro
       const nombre = await bajarExcelPost(
         '/exports/tabla.xlsx',
         {
-          fileName: `Ocupacion_${data.date_from}_${data.date_to}.xlsx`,
+          fileName: `Ocupacion_${from}_${to}.xlsx`,
           sheets: [
             { name: 'Ocupación', headers: header, rows: grid },
             {
@@ -262,10 +591,10 @@ export function OcupacionBoard({ from, to, enabled = true, parte = 'todo' }: Pro
   }
 
   async function exportarDesdobles() {
-    if (!desdobles.length) return;
+    if (!desdoblesVista.length) return;
     setExportBusy('desdobles');
     try {
-      const rows = desdobles.map((d) => [
+      const rows = desdoblesVista.map((d) => [
         fechaCorta(d.date),
         TURNOS.find((t) => t.code === d.turno)?.label ?? d.turno,
         d.movilOrigen,
@@ -331,11 +660,12 @@ export function OcupacionBoard({ from, to, enabled = true, parte = 'todo' }: Pro
 
   const showOc = parte === 'todo' || parte === 'ocupacion';
   const showDes = parte === 'todo' || parte === 'desdobles';
+  const hayOcupacion = Boolean(data) || Boolean(board?.days?.length);
 
   return (
     <div
       className={`${parte === 'todo' ? 'cuad-ocupacion stack' : 'cuad-dock-slot'}${
-        busy && data ? ' is-refreshing' : ''
+        busy && hayOcupacion ? ' is-refreshing' : ''
       }`}
     >
       {showOc ? (
@@ -345,7 +675,7 @@ export function OcupacionBoard({ from, to, enabled = true, parte = 'todo' }: Pro
       >
         <header className="oc-headbar">
           <h2 className="oc-title">Ocupación</h2>
-          {data ? (
+          {hayOcupacion ? (
             <ul className="oc-kpis">
               {ocBoxes
                 .filter((b) => b.visible)
@@ -365,17 +695,30 @@ export function OcupacionBoard({ from, to, enabled = true, parte = 'todo' }: Pro
                       className={`oc-kpi ${TONO[k].cls}`}
                       style={{ background: b.bg, color: b.fg }}
                     >
-                      <strong>{data.totales[TONO[k].kpi]}</strong>
+                      <strong>{totalesVista[TONO[k].kpi]}</strong>
                       <span>{TONO[k].label}</span>
                     </li>
                   );
                 })}
             </ul>
           ) : null}
+          {hayOcupacion && opcionesExtra.length ? (
+            <div className="oc-kpi-pick">
+              <FilterPicker
+                id="oc-otras"
+                options={opcionesExtra}
+                values={extrasConteo}
+                onChange={setExtrasConteo}
+                allLabel="Otras"
+                summaryLabel="Otras"
+                aria-label="Otras licencias para contar por día"
+              />
+            </div>
+          ) : null}
           <div className="oc-headbar-actions">
             <ExcelMenu
               busy={exportBusy === 'ocupacion'}
-              disabled={!data || busy || Boolean(exportBusy)}
+              disabled={!hayOcupacion || busy || Boolean(exportBusy)}
               items={[{ id: 'ocupacion', label: 'Ocupación' }]}
               onPick={() => void exportarOcupacion()}
             />
@@ -391,9 +734,9 @@ export function OcupacionBoard({ from, to, enabled = true, parte = 'todo' }: Pro
           </div>
         </header>
 
-        {panelOculto ? null : busy && !data ? (
+        {panelOculto ? null : busy && !hayOcupacion ? (
           <SkeletonTable cols={8} rows={6} />
-        ) : !data ? (
+        ) : !hayOcupacion ? (
           <EmptyState
             compact
             title={busy ? 'Calculando ocupación…' : 'Sin ocupación para el período'}
@@ -401,97 +744,117 @@ export function OcupacionBoard({ from, to, enabled = true, parte = 'todo' }: Pro
           />
         ) : (
           <div className="oc-freeze">
-            <div
-              className="oc-labels-col"
-              ref={labelsRef}
-              onScroll={(e) => syncScrollY('labels', e)}
-            >
-              <table className="oc-labels">
-                <thead>
-                  <tr>
-                    <th>Móvil</th>
-                    <th>Turno</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {MOVILES.flatMap((movil) =>
-                    TURNOS.map((turno, i) => (
-                      <tr
-                        key={`${movil}-${turno.code}`}
-                        className={i === 0 ? 'oc-movil-start' : undefined}
-                      >
-                        <td className="oc-movil-cell">
-                          {i === 0 ? (
-                            <>
-                              {movil}
-                              {movil === 4 ? (
-                                <span className="oc-movil-hint">manual</span>
-                              ) : null}
-                            </>
-                          ) : null}
-                        </td>
-                        <td>{turno.label}</td>
-                      </tr>
-                    )),
-                  )}
-                </tbody>
-              </table>
-            </div>
-            <div
-              className="oc-dates-col"
-              ref={datesRef}
-              onScroll={(e) => syncScrollY('dates', e)}
-            >
-              <table className="oc-dates">
-                <thead>
-                  <tr>
-                    {fechas.map((f) => (
-                      <th key={f}>{fechaCorta(f)}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {MOVILES.flatMap((movil) =>
-                    TURNOS.map((turno, i) => (
-                      <tr
-                        key={`${movil}-${turno.code}`}
-                        className={i === 0 ? 'oc-movil-start' : undefined}
-                      >
-                        {fechas.map((f) => {
-                          const slot = porClave.get(`${f}|${movil}|${turno.code}`);
-                          const estado = slot?.estado ?? 'HUECO';
-                          const tono =
-                            turno.code === 'M'
-                              ? 'manana'
-                              : turno.code === 'T'
-                                ? 'tarde'
-                                : 'noche';
-                          const extra =
-                            estado === 'HUECO'
+            <table className={`oc-grid${hayFiltroCruza ? ' is-filtering' : ''}`}>
+              <colgroup>
+                <col className="oc-col-movil" />
+                <col className="oc-col-turno" />
+                {fechas.map((f) => (
+                  <col key={f} className="oc-col-day" />
+                ))}
+              </colgroup>
+              <thead>
+                <tr>
+                  <th className="oc-pin oc-pin-movil">Móvil</th>
+                  <th className="oc-pin oc-pin-turno">Turno</th>
+                  {fechas.map((f) => (
+                    <th key={f}>{fechaCorta(f)}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {movilesVista.flatMap((movil) =>
+                  turnosVista.map((turno, i) => (
+                    <tr
+                      key={`${movil}-${turno.code}`}
+                      className={i === 0 ? 'oc-movil-start' : undefined}
+                    >
+                      <td className="oc-pin oc-pin-movil oc-movil-cell">
+                        {i === 0 ? (
+                          <>
+                            {movil}
+                            {movil === 4 ? (
+                              <span className="oc-movil-hint">manual</span>
+                            ) : null}
+                          </>
+                        ) : null}
+                      </td>
+                      <td className="oc-pin oc-pin-turno">{turno.label}</td>
+                      {fechas.map((f) => {
+                        const slot = porClave.get(`${f}|${movil}|${turno.code}`);
+                        const estado = slot?.estado ?? 'HUECO';
+                        const fuera = Boolean(slot?.fueraFiltro);
+                        const coincide = hayFiltroCruza && !fuera && (slot?.cantidad ?? 0) > 0;
+                        const tono =
+                          turno.code === 'M'
+                            ? 'manana'
+                            : turno.code === 'T'
+                              ? 'tarde'
+                              : 'noche';
+                        const extra = fuera
+                          ? ' is-filtered'
+                          : coincide
+                            ? ' is-match'
+                            : estado === 'HUECO'
                               ? ' oc-slot-hueco'
                               : estado === 'SUPERPUESTA'
                                 ? ' oc-slot-super'
                                 : '';
-                          return (
-                            <td
-                              key={f}
-                              className={`sap-cell-${tono}${extra}`}
-                              title={
-                                slot?.inspectores.length
+                        return (
+                          <td
+                            key={f}
+                            className={`sap-cell-${tono}${extra}`}
+                            title={
+                              fuera
+                                ? 'No coincide con el filtro'
+                                : slot?.inspectores.length
                                   ? `${slot.cantidad} · ${slot.inspectores.join(', ')}`
                                   : 'Sin cobertura'
-                              }
-                            >
-                              {slot?.cantidad ?? 0}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    )),
-                  )}
-                </tbody>
-              </table>
-            </div>
+                            }
+                          >
+                            {slot?.cantidad ?? 0}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  )),
+                )}
+                {filasSit.map((fila, i) => (
+                  <tr key={fila.id} className={`oc-sit${i === 0 ? ' oc-movil-start' : ''}`}>
+                    <td
+                      className={`oc-pin oc-pin-movil ${fila.cls}`}
+                      style={
+                        fila.bg
+                          ? { background: fila.bg, color: fila.fg || '#fff' }
+                          : undefined
+                      }
+                    >
+                      <span className="oc-sit-name">{fila.label}</span>
+                    </td>
+                    <td
+                      className={`oc-pin oc-pin-turno ${fila.cls}`}
+                      style={
+                        fila.bg
+                          ? { background: fila.bg, color: fila.fg || '#fff' }
+                          : undefined
+                      }
+                    />
+                    {fechas.map((f) => (
+                      <td
+                        key={f}
+                        className={fila.cls}
+                        style={
+                          fila.bg
+                            ? { background: fila.bg, color: fila.fg || '#fff' }
+                            : undefined
+                        }
+                      >
+                        {fila.n(f)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </section>
@@ -518,7 +881,7 @@ export function OcupacionBoard({ from, to, enabled = true, parte = 'todo' }: Pro
             <div className="cuad-desdobles-bar-actions">
               <ExcelMenu
                 busy={exportBusy === 'desdobles'}
-                disabled={Boolean(exportBusy) || !desdobles.length}
+                disabled={Boolean(exportBusy) || !desdoblesVista.length}
                 items={[{ id: 'desdobles', label: 'Desdobles' }]}
                 onPick={() => void exportarDesdobles()}
               />
@@ -574,7 +937,7 @@ export function OcupacionBoard({ from, to, enabled = true, parte = 'todo' }: Pro
               </label>
               <ExcelMenu
                 busy={exportBusy === 'desdobles'}
-                disabled={Boolean(exportBusy) || !desdobles.length}
+                disabled={Boolean(exportBusy) || !desdoblesVista.length}
                 items={[{ id: 'desdobles', label: 'Desdobles' }]}
                 onPick={() => void exportarDesdobles()}
               />
@@ -583,7 +946,11 @@ export function OcupacionBoard({ from, to, enabled = true, parte = 'todo' }: Pro
               </button>
             </header>
             {lista.length === 0 ? (
-              <p className="muted cuad-desdobles-empty">No hay desdobles pendientes.</p>
+              <p className="muted cuad-desdobles-empty">
+                {desdoblesVista.length === 0 && desdobles.length
+                  ? 'Ningún desdoble coincide con los filtros.'
+                  : 'No hay desdobles pendientes.'}
+              </p>
             ) : (
               <>
                 <div className="cuad-desdobles-scroll">

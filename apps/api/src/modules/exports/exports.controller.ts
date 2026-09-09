@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import type { Response } from 'express';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
@@ -9,16 +9,23 @@ import {
   IsIn,
   IsOptional,
   IsString,
+  IsUUID,
   MaxLength,
   ValidateNested,
 } from 'class-validator';
-import { ROLE_CODES } from '@plataforma/shared';
-import { Roles, RolesGuard } from '../identity/roles.guard';
+import { PERMISSION_CODES, ROLE_CODES } from '@plataforma/shared';
+import { CurrentUser, type RequestUser } from '../identity/current-user.decorator';
+import { Permissions, Roles, RolesGuard } from '../identity/roles.guard';
 import { ExportsService } from './exports.service';
 
 class TimerFilaDto {
   @IsDateString()
   fecha!: string;
+
+  @Transform(({ value }) => (value ? String(value) : undefined))
+  @IsOptional()
+  @IsUUID()
+  inspector_id?: string;
 
   @IsOptional()
   @IsString()
@@ -59,6 +66,11 @@ class TimerExportDto {
 
   @IsDateString()
   to!: string;
+
+  @Transform(({ value }) => (value ? String(value) : undefined))
+  @IsOptional()
+  @IsUUID()
+  guardado_id?: string;
 
   @IsArray()
   @ArrayMaxSize(2000)
@@ -106,7 +118,10 @@ export class ExportsController {
     ROLE_CODES.ADMIN_SYS,
     ROLE_CODES.JEFE,
     ROLE_CODES.CONSULTA,
+    ROLE_CODES.RH,
+    ROLE_CODES.AUDITOR,
   )
+  @Permissions(PERMISSION_CODES.EXCEL_EXPORTAR)
   async version(
     @Param('id') id: string,
     @Query('pack') pack: string | undefined,
@@ -153,13 +168,21 @@ export class ExportsController {
     ROLE_CODES.ADMIN_SYS,
     ROLE_CODES.JEFE,
     ROLE_CODES.CONSULTA,
+    ROLE_CODES.RH,
+    ROLE_CODES.AUDITOR,
   )
-  async timer(@Body() body: TimerExportDto, @Res() res: Response) {
+  @Permissions(PERMISSION_CODES.EXCEL_EXPORTAR)
+  async timer(
+    @Body() body: TimerExportDto,
+    @CurrentUser() user: RequestUser,
+    @Res() res: Response,
+  ) {
     const { buffer, fileName } = await this.exports.timer(
       body.from,
       body.to,
       body.filas.map((f) => ({
         fecha: f.fecha,
+        inspector_id: f.inspector_id,
         legajo: f.legajo ?? '',
         persona: f.persona,
         origen: f.origen,
@@ -168,6 +191,7 @@ export class ExportsController {
         motivo: f.motivo ?? '',
         observacion: f.observacion ?? '',
       })),
+      { userId: user.userId, guardadoId: body.guardado_id },
     );
     res.setHeader(
       'Content-Type',
@@ -184,7 +208,10 @@ export class ExportsController {
     ROLE_CODES.ADMIN_SYS,
     ROLE_CODES.JEFE,
     ROLE_CODES.CONSULTA,
+    ROLE_CODES.RH,
+    ROLE_CODES.AUDITOR,
   )
+  @Permissions(PERMISSION_CODES.EXCEL_EXPORTAR)
   async tabla(@Body() body: TablaExportDto, @Res() res: Response) {
     const { buffer, fileName } = await this.exports.tabla({
       fileName: body.fileName,

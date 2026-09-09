@@ -58,7 +58,7 @@ export function SearchSelect({
   } | null>(null);
 
   const elegido = options.find((o) => o.id === value) ?? null;
-  const texto = abierto ? query : (elegido?.label ?? '');
+  const texto = abierto ? query : (elegido?.label ?? value);
   const opciones = useMemo(
     () => options.filter((o) => coincide(o, query)),
     [options, query],

@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import ExcelJS from 'exceljs';
 import { DatabaseService } from '../../database/database.service';
+import { cargarMembreteTimer } from './membrete';
 
 /** Colores por turno, iguales a los de la planilla en uso. */
 const COLOR = {
@@ -77,6 +78,36 @@ const SECCION_XLS: Record<string, string> = {
   MOVILES: 'Móviles (SV)',
   EPI: 'E.P.I.',
   BO: 'Base de Operaciones',
+  APC: 'APC',
+  AUTOVIA_CALAMUCHITA: 'Autovía Calamuchita',
+  AUTOVIA_PUNILLA: 'Autovía Punilla',
+  RUTA_19: 'Ruta 19',
+  RUTA_20: 'Ruta 20',
+  RUTA_2JC: 'Ruta 2JC',
+  RUTA_36: 'Ruta 36',
+  RUTA_36_ARROYO_TEGUA: 'Ruta 36 Arroyo Tegua',
+  RUTA_36_PIEDRAS_MORAS: 'Ruta 36 Piedras Moras',
+  RUTA_5: 'Ruta 5',
+  RUTA_9_NORTE: 'Ruta 9 Norte',
+  RUTA_9_SUR: 'Ruta 9 Sur',
+  RUTA_E53: 'Ruta E53',
+  RUTA_E55: 'Ruta E55',
+};
+
+const TEAL = '2F6F73';
+const CEBRA = 'EEF3F4';
+const SECCION_TINT = 'D9E4E8';
+const BORDE_NEGRO: Partial<ExcelJS.Borders> = {
+  top: { style: 'thin', color: { argb: 'FF000000' } },
+  left: { style: 'thin', color: { argb: 'FF000000' } },
+  bottom: { style: 'thin', color: { argb: 'FF000000' } },
+  right: { style: 'thin', color: { argb: 'FF000000' } },
+};
+const BORDE_MEMBRETE: Partial<ExcelJS.Borders> = {
+  top: { style: 'medium', color: { argb: 'FF000000' } },
+  left: { style: 'medium', color: { argb: 'FF000000' } },
+  bottom: { style: 'medium', color: { argb: 'FF000000' } },
+  right: { style: 'medium', color: { argb: 'FF000000' } },
 };
 
 function etiquetaSeccionXls(id: string | null | undefined) {
@@ -150,11 +181,11 @@ function ddmm(iso: string): string {
   return `${d}/${m}`;
 }
 
-function hexArgb(hex?: string | null): string | null {
-  if (!hex) return null;
-  const t = hex.trim().replace('#', '');
-  if (!/^[0-9A-Fa-f]{6}$/.test(t)) return null;
-  return t.toUpperCase();
+function ddmmyyyy(iso: string): string {
+  const d = iso.slice(0, 10);
+  const [y, m, day] = d.split('-');
+  if (!y || !m || !day) return iso;
+  return `${day}/${m}/${y}`;
 }
 
 type CodigoCat = {
@@ -176,18 +207,6 @@ function textoTimerCodigo(codigo: string, mapa: Map<string, CodigoCat>): string 
   if (desc && sap) return `${c}  ${desc} / ${sap}`;
   if (desc) return `${c}  ${desc}`;
   return c;
-}
-
-function pintarCodigo(cell: ExcelJS.Cell, codigo: string, mapa: Map<string, CodigoCat>) {
-  const row = mapa.get(codigo.trim().toUpperCase());
-  const bg = hexArgb(row?.color_fondo);
-  const fg = hexArgb(row?.color_letra);
-  if (bg) cell.fill = relleno(bg);
-  cell.font = {
-    size: 10,
-    bold: true,
-    color: fg ? { argb: `FF${fg}` } : undefined,
-  };
 }
 
 @Injectable()
@@ -597,6 +616,7 @@ export class ExportsService {
     to: string,
     filas: Array<{
       fecha: string;
+      inspector_id?: string;
       legajo: string;
       persona: string;
       origen: string;
@@ -605,6 +625,7 @@ export class ExportsService {
       motivo: string;
       observacion: string;
     }>,
+    ctx: { userId: string; guardadoId?: string },
   ): Promise<{ buffer: Buffer; fileName: string }> {
     const catalogo = await this.db.query<CodigoCat>(
       `SELECT DISTINCT ON (upper(btrim(codigo)))
@@ -620,72 +641,187 @@ export class ExportsService {
       const key = (r.codigo || '').trim().toUpperCase();
       if (key) mapa.set(key, r);
     }
+
+    const ids = [
+      ...new Set(filas.map((f) => f.inspector_id).filter((id): id is string => Boolean(id))),
+    ];
+    const porInspector = new Map<
+      string,
+      { legajo: string; seccion: string | null; persona: string }
+    >();
+    if (ids.length) {
+      const gente = await this.db.query<{
+        id: string;
+        legajo: string | null;
+        seccion: string | null;
+        apellido: string | null;
+        nombres: string | null;
+        nombre_completo: string | null;
+      }>(
+        `SELECT id, legajo, seccion, apellido, nombres, nombre_completo
+         FROM seguridad_vial.inspector
+         WHERE id = ANY($1::uuid[])`,
+        [ids],
+      );
+      for (const g of gente.rows) {
+        const ape = g.apellido?.trim();
+        const nom = g.nombres?.trim();
+        const persona = ape && nom ? `${ape}, ${nom}` : (g.nombre_completo || '').trim();
+        porInspector.set(g.id, {
+          legajo: g.legajo || '',
+          seccion: g.seccion,
+          persona,
+        });
+      }
+    }
+
+    const responsable = await this.responsableTimer(ctx.userId, ctx.guardadoId);
+    const { cfg, logoPath } = cargarMembreteTimer();
+
     const wb = new ExcelJS.Workbook();
-    wb.creator = 'Cuadratura - Seguridad Vial';
+    wb.creator = cfg.empresa;
     wb.created = new Date();
     const ws = wb.addWorksheet('Timer', {
-      views: [{ state: 'frozen', ySplit: 1 }],
+      views: [{ state: 'frozen', ySplit: 5 }],
+      pageSetup: {
+        orientation: 'landscape',
+        fitToPage: true,
+        fitToWidth: 1,
+        fitToHeight: 0,
+        paperSize: 9,
+        margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 },
+      },
+      headerFooter: {
+        oddFooter: `&L${cfg.codigo} Rev. ${cfg.revision}&C${cfg.subtitulo}&R${ddmmyyyy(from)} – ${ddmmyyyy(to)}`,
+      },
     });
-    const headers = [
-      'Fecha',
-      'Legajo',
-      'Persona',
-      'Origen',
-      'Ideal',
-      'Real',
-      'Motivo',
-      'Observación',
-    ];
     ws.columns = [
-      { width: 12 },
-      { width: 12 },
+      { width: 18 },
       { width: 28 },
       { width: 14 },
+      { width: 28 },
+      { width: 18 },
+      { width: 16 },
       { width: 36 },
-      { width: 36 },
+      { width: 28 },
       { width: 32 },
-      { width: 36 },
     ];
-    const head = ws.addRow(headers);
-    head.font = { bold: true, size: 10 };
-    head.eachCell((c) => {
-      c.fill = relleno('1F5A2A');
-      c.font = { bold: true, size: 10, color: { argb: 'FFFFFFFF' } };
-      c.border = BORDE;
+
+    ws.mergeCells('A1:I3');
+    for (let r = 1; r <= 3; r += 1) {
+      ws.getRow(r).height = 22;
+      for (let c = 1; c <= 9; c += 1) {
+        ws.getCell(r, c).border = BORDE_MEMBRETE;
+      }
+    }
+    const logoCell = ws.getCell('A1');
+    logoCell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+    if (logoPath) {
+      const imgId = wb.addImage({ filename: logoPath, extension: 'png' });
+      ws.addImage(imgId, {
+        tl: { col: 0, row: 0 },
+        ext: { width: 1100, height: 68 },
+        editAs: 'oneCell',
+      });
+    } else {
+      logoCell.value = `${cfg.titulo} — ${cfg.subtitulo}  ·  ${cfg.codigo} Rev. ${cfg.revision}`;
+      logoCell.font = { bold: true, size: 12 };
+    }
+
+    ws.getRow(4).height = 8;
+
+    const headers = [
+      'Legajo del Responsable',
+      'Apellido y Nombre del Responsable',
+      'Legajo del Personal',
+      'Apellido y Nombre del Personal',
+      'Sección',
+      'Fecha de la Novedad',
+      'Horario Real de Trabajo - Ausentismo',
+      'Motivo de la Novedad/Cambio',
+      'Observación',
+    ];
+    const head = ws.getRow(5);
+    head.height = 36;
+    headers.forEach((texto, i) => {
+      const c = head.getCell(i + 1);
+      c.value = texto;
+      c.fill = relleno(TEAL);
+      c.font = { bold: true, size: 9, color: { argb: 'FFFFFFFF' }, name: 'Calibri' };
+      c.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+      c.border = BORDE_NEGRO;
     });
+
     const ordenadas = [...filas].sort((a, b) => {
       const f = a.fecha.localeCompare(b.fecha);
       if (f) return f;
       return a.persona.localeCompare(b.persona, 'es');
     });
-    for (const f of ordenadas) {
-      const agregada = f.origen === 'extra';
-      const row = ws.addRow([
-        ddmm(f.fecha.length >= 10 ? f.fecha.slice(0, 10) : f.fecha),
-        f.legajo || '',
-        f.persona || '',
-        agregada ? 'Agregada' : 'Cambio',
-        textoTimerCodigo(f.ideal, mapa),
-        textoTimerCodigo(f.real, mapa),
-        f.motivo || '',
-        f.observacion || '',
-      ]);
-      row.height = 28;
-      row.eachCell((c) => {
-        c.border = BORDE;
-        c.font = { size: 10 };
-        c.alignment = { vertical: 'middle', wrapText: true };
+    ordenadas.forEach((f, i) => {
+      const info = f.inspector_id ? porInspector.get(f.inspector_id) : undefined;
+      const horario = textoTimerCodigo(f.real, mapa) || textoTimerCodigo(f.ideal, mapa);
+      const row = ws.getRow(6 + i);
+      row.height = 22;
+      const vals = [
+        responsable.legajo,
+        responsable.nombre,
+        info?.legajo || f.legajo || '',
+        info?.persona || f.persona || '',
+        info?.seccion ? etiquetaSeccionXls(info.seccion) : '',
+        ddmmyyyy(f.fecha.length >= 10 ? f.fecha.slice(0, 10) : f.fecha),
+        horario,
+        (f.motivo || '').trim(),
+        (f.observacion || '').trim(),
+      ];
+      vals.forEach((v, col) => {
+        row.getCell(col + 1).value = v;
       });
-      row.getCell(2).numFmt = '@';
-      pintarCodigo(row.getCell(5), f.ideal, mapa);
-      pintarCodigo(row.getCell(6), f.real, mapa);
-      if (agregada) {
-        row.getCell(4).fill = relleno('D9EAD3');
-      }
-    }
+      row.eachCell((c, col) => {
+        c.border = BORDE_NEGRO;
+        c.font = { size: 9, name: 'Calibri' };
+        c.alignment = { vertical: 'middle', wrapText: true };
+        if (i % 2 === 1) c.fill = relleno(CEBRA);
+        if (col === 5) c.fill = relleno(SECCION_TINT);
+        if (col === 1 || col === 3) c.numFmt = '@';
+        if (col === 6) c.alignment = { vertical: 'middle', horizontal: 'center' };
+      });
+    });
+
     const buffer = Buffer.from(await wb.xlsx.writeBuffer());
     const periodo = `${from.slice(0, 10).replace(/-/g, '')}_${to.slice(0, 10).replace(/-/g, '')}`;
-    return { buffer, fileName: `Timer_REAL_${periodo}.xlsx` };
+    return { buffer, fileName: `Timer_RPASV019_${periodo}.xlsx` };
+  }
+
+  private async responsableTimer(
+    userId: string,
+    guardadoId?: string,
+  ): Promise<{ legajo: string; nombre: string }> {
+    let uid = userId;
+    if (guardadoId) {
+      const g = await this.db.query<{ guardado_por: string }>(
+        `SELECT guardado_por FROM seguridad_vial.timer_guardado WHERE id = $1`,
+        [guardadoId],
+      );
+      if (g.rows[0]?.guardado_por) uid = g.rows[0].guardado_por;
+    }
+    const u = await this.db.query<{
+      nombre_mostrar: string;
+      legajo: string | null;
+      apellido: string | null;
+      nombres: string | null;
+    }>(
+      `SELECT nombre_mostrar, legajo, apellido, nombres
+       FROM seguridad_vial.usuario
+       WHERE id = $1`,
+      [uid],
+    );
+    const row = u.rows[0];
+    const ape = row?.apellido?.trim() || '';
+    const nom = row?.nombres?.trim() || '';
+    return {
+      nombre: ape && nom ? `${ape}, ${nom}` : row?.nombre_mostrar || '',
+      legajo: row?.legajo?.trim() || '',
+    };
   }
 
   async tabla(input: {
